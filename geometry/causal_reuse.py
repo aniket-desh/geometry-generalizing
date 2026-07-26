@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import pickle
@@ -48,6 +49,12 @@ def parse_args() -> argparse.Namespace:
         "--layers",
         default="all",
         help="Comma-separated residual-stream layers, or all.",
+    )
+    parser.add_argument(
+        "--successor-mode",
+        choices=("task-generator", "latent-cycle"),
+        default="task-generator",
+        help="Transition whose learned activation transport is tested.",
     )
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--fold-seed", type=int, default=2027)
@@ -994,18 +1001,27 @@ def main() -> None:
             )
         ),
     )
-    if task.generator is None:
+    if args.successor_mode == "latent-cycle":
+        successor = (np.arange(order) + 1) % order
+        successor_definition = (
+            "matched canonical latent-label +1 cycle, independent of the "
+            "saved operation table"
+        )
+        generator_relation = None
+    elif task.generator is None:
         successor = (np.arange(order) + 1) % order
         successor_definition = (
             "canonical latent-label cycle used as an exogenous control because "
             "the task has no designated generator"
         )
+        generator_relation = None
     else:
         successor = np.asarray(table[:, task.generator], dtype=np.int64)
         successor_definition = (
             f"operation-table relation {task.generator}, the task's designated "
             "generator"
         )
+        generator_relation = task.generator
 
     layout = TokenLayout(
         order,
@@ -1096,7 +1112,26 @@ def main() -> None:
         "run_name": config["run_name"],
         "task": config["task"],
         "order": order,
-        "generator_relation": task.generator,
+        "successor_mode": (
+            "latent_label_plus_one"
+            if args.successor_mode == "latent-cycle"
+            else "task_generator"
+        ),
+        "successor_preregistered": args.successor_mode == "latent-cycle",
+        "successor_vector": successor.tolist(),
+        "successor_sha256": hashlib.sha256(
+            np.asarray(successor, dtype="<i8").tobytes()
+        ).hexdigest(),
+        "successor_orientation_rule": (
+            "latent integer label k maps to (k + 1) mod order before activation "
+            "analysis; surface token IDs are arbitrary and never set orientation"
+        ),
+        "counterfactual_definition": (
+            "replace input latent state k with (k + 1) mod order while holding "
+            "relation, aliases, and nuisance context fixed"
+        ),
+        "generator_relation": generator_relation,
+        "task_designated_generator": task.generator,
         "successor_definition": successor_definition,
         "checkpoints": [path.name for path in checkpoints],
         "patch_sites": [
@@ -1126,6 +1161,11 @@ def main() -> None:
             "natural within-target-state RMS radius"
         ),
         "controls": {
+            "learned_generator": (
+                "legacy record key for the preregistered canonical latent-cycle "
+                "transport k -> (k + 1) mod order; it is not selected from the "
+                "task table or oriented post hoc"
+            ),
             "exact_state_swap": (
                 "the activation from the naturally shifted input under matched "
                 "context and aliases"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import pickle
@@ -33,6 +34,12 @@ def parse_args() -> argparse.Namespace:
             "Explicit operation-table column to treat as a pseudo-generator. "
             "Required for random controls without a designated generator."
         ),
+    )
+    parser.add_argument(
+        "--successor-mode",
+        choices=("task-generator", "latent-cycle"),
+        default="task-generator",
+        help="Preregistered transition whose reusable action is measured.",
     )
     parser.add_argument(
         "--steps",
@@ -921,14 +928,23 @@ def main() -> None:
         if table_path.exists()
         else np.asarray(task.table, dtype=np.int64)
     )
-    generator_relation, generator_relation_source = resolve_generator_relation(
-        designated=task.generator,
-        explicit=args.generator_relation,
-        relation_count=operation_table.shape[1],
-    )
-    successor = np.asarray(
-        operation_table[:, generator_relation], dtype=np.int64
-    )
+    if args.successor_mode == "latent-cycle":
+        if args.generator_relation is not None:
+            raise ValueError(
+                "--generator-relation cannot be combined with latent-cycle mode"
+            )
+        successor = (np.arange(task.order, dtype=np.int64) + 1) % task.order
+        generator_relation = None
+        generator_relation_source = "preregistered_canonical_latent_cycle"
+    else:
+        generator_relation, generator_relation_source = resolve_generator_relation(
+            designated=task.generator,
+            explicit=args.generator_relation,
+            relation_count=operation_table.shape[1],
+        )
+        successor = np.asarray(
+            operation_table[:, generator_relation], dtype=np.int64
+        )
     aliases = int(config["aliases"])
     contexts = int(config["contexts"])
     model_config = ModelConfig(**config["model"])
@@ -1044,6 +1060,20 @@ def main() -> None:
         "run_name": config["run_name"],
         "task": task.name,
         "order": task.order,
+        "successor_mode": (
+            "latent_label_plus_one"
+            if args.successor_mode == "latent-cycle"
+            else "task_generator"
+        ),
+        "successor_preregistered": args.successor_mode == "latent-cycle",
+        "successor_vector": successor.tolist(),
+        "successor_sha256": hashlib.sha256(
+            np.asarray(successor, dtype="<i8").tobytes()
+        ).hexdigest(),
+        "successor_orientation_rule": (
+            "latent integer label k maps to (k + 1) mod order before activation "
+            "analysis; surface token IDs are arbitrary and never set orientation"
+        ),
         "generator_relation": generator_relation,
         "generator_relation_source": generator_relation_source,
         "generator_relation_explicit": args.generator_relation is not None,
@@ -1070,8 +1100,8 @@ def main() -> None:
         ),
         "multi_power_code": (
             "fixed-precision Gaussian residual bits plus a BIC penalty; "
-            "the diagnostic shared model pays for one affine-orthogonal "
-            "generator and the diagnostic independent model pays for one "
+            "the shared model pays for one preregistered canonical-cycle "
+            "affine-orthogonal transport and the independent model pays for one "
             "affine-orthogonal operator per tested power"
         ),
         "reuse_gain_bits_alias": "lookup_reuse_gain_bits",

@@ -58,7 +58,17 @@ the training-state × training-alias cross-product. Held-out activations are
 projected afterward, and the reusable action is scored as one affine-orthogonal
 map, so neither the representation basis nor the transition fit sees test
 vocabulary.
-The final marker is withheld until behavior, generator geometry, usable
+
+The primary cross-condition probe is preregistered as the canonical latent-label
+cycle `k → (k + 1) mod n` before activations are inspected. The labels are
+planted by the benchmark while surface token IDs remain arbitrary, so the
+orientation is never selected post hoc. Both the inductive operator fit and
+the causal counterfactual use that exact vector for clean, corrupted, and
+random conditions; table-relation analyses are secondary diagnostics. Causal
+transport is tested at the input node before the first block and at the output
+residual stream after the final block.
+
+The final marker is withheld until behavior, canonical-cycle geometry, usable
 shared-rule MDL, and causal outputs validate for all 18 runs.
 `render_priority.py` writes Nord spaghetti plots with faded seeds and bold
 pointwise medians. Packing is independently disabled by default because

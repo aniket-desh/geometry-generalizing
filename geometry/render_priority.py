@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import tempfile
@@ -43,6 +44,10 @@ CONDITION_STYLE = {
     "clean": ("clean · 60k", NORD["frost_dark"]),
     "corrupt15": ("15% corrupted · 30k", NORD["orange"]),
     "random": ("random table · 30k", NORD["purple"]),
+}
+PRIORITY_CONTROL_LABEL = {
+    **CONTROL_LABEL,
+    "learned_generator": "canonical cycle",
 }
 
 
@@ -197,13 +202,17 @@ def render_spaghetti(
 ) -> list[Path]:
     specs: tuple[tuple[str, str, Callable[[KeyRun], tuple[np.ndarray, np.ndarray]]], ...] = (
         ("held-out accuracy", "accuracy", _behavior_curve),
-        ("generator error", "error", lambda run: _operator_curve(run, "joint_cv_error")),
+        (
+            "canonical-cycle error",
+            "error",
+            lambda run: _operator_curve(run, "joint_cv_error"),
+        ),
         (
             "usable shared-rule gain",
             "kbit",
             lambda run: _operator_curve(run, "usable_reuse_gain_bits"),
         ),
-        ("causal endpoint", "success", _causal_curve),
+        ("canonical-cycle causal probe", "success", _causal_curve),
     )
     fig, axes = plt.subplots(
         len(presets),
@@ -313,7 +322,11 @@ def render_causal_controls(
                 axis.set_title(CONDITION_STYLE[condition][0], fontweight="normal")
             if column == 0:
                 axis.set_ylabel(f"{preset}\nsuccess")
-            axis.set_xticks(x, [CONTROL_LABEL[name] for name in CONTROL_ORDER], rotation=24)
+            axis.set_xticks(
+                x,
+                [PRIORITY_CONTROL_LABEL[name] for name in CONTROL_ORDER],
+                rotation=24,
+            )
             axis.set_ylim(-0.03, 1.03)
             axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
             _style_axis(axis)
@@ -360,9 +373,9 @@ def render(
                     "endpoint_step": HORIZONS[condition],
                     "seed_count": len(selected),
                     "test_accuracy_median": float(np.median([_behavior_curve(run)[1][-1] for run in selected])),
-                    "generator_error_median": float(np.median([_operator_curve(run, "joint_cv_error")[1][-1] for run in selected])),
+                    "canonical_cycle_error_median": float(np.median([_operator_curve(run, "joint_cv_error")[1][-1] for run in selected])),
                     "usable_mdl_kbit_median": float(np.median([_operator_curve(run, "usable_reuse_gain_bits")[1][-1] for run in selected])),
-                    "causal_success_median": float(np.median([_causal_value(run) for run in selected])),
+                    "canonical_cycle_causal_success_median": float(np.median([_causal_value(run) for run in selected])),
                 }
             )
     summary_path = output / "priority-endpoint-summary.json"
@@ -385,7 +398,12 @@ def render(
             "clean": "60000",
             "corrupt15": "30000",
             "random": "30000",
-            "patch_site": "output residual stream, final layer",
+            "probe": "preregistered canonical latent-label k -> k + 1 cycle",
+            "successor_mode": "latent_label_plus_one",
+            "patch_sites": [
+                "input node, layer 0",
+                "output residual stream, final layer",
+            ],
             "folds": 3,
             "controls": list(CONTROL_ORDER),
         },
@@ -407,14 +425,27 @@ def _synthetic_run(
 ) -> KeyRun:
     run = KeyRun(root / f"{condition}-{preset}-s{seed}", task, corruption, condition, preset, seed)
     run.path.mkdir()
+    order = 17
+    successor = (np.arange(order, dtype=np.int64) + 1) % order
+    successor_metadata = {
+        "successor_mode": "latent_label_plus_one",
+        "successor_preregistered": True,
+        "successor_vector": successor.tolist(),
+        "successor_sha256": hashlib.sha256(
+            np.asarray(successor, dtype="<i8").tobytes()
+        ).hexdigest(),
+        "generator_relation": None,
+    }
     atomic_json(
         run.path / "config.json",
         {
             "run_name": run.path.name,
             "task": task,
             "task_corruption_fraction": corruption,
+            "task_order": order,
             "preset": preset,
             "seed": seed,
+            "model": {"depth": 1},
         },
     )
     horizon = horizon_for(run)
@@ -433,6 +464,7 @@ def _synthetic_run(
                 "run_name": run.path.name,
                 "folds": 5,
                 "projection_fit": "inductive_state_alias_fold",
+                **successor_metadata,
             },
             "records": [
                 {
@@ -451,6 +483,7 @@ def _synthetic_run(
     job = CausalJob(run, horizon)
     prefix = causal_prefix(job)
     checkpoint = f"weights-{horizon:06d}.pt"
+    sites = (("node", 0), ("output", 1))
     atomic_json(
         prefix.with_suffix(".json"),
         {
@@ -458,15 +491,20 @@ def _synthetic_run(
                 "run_name": run.path.name,
                 "folds": 3,
                 "checkpoints": [checkpoint],
-                "patch_sites": [{"position": "output", "layer": 1}],
+                "patch_sites": [
+                    {"position": position, "layer": layer}
+                    for position, layer in sites
+                ],
+                "successor_mode": "latent_label_plus_one",
+                **successor_metadata,
             },
             "records": [
                 {
                     "step": horizon,
                     "checkpoint": checkpoint,
                     "fold": fold,
-                    "position": "output",
-                    "layer": 1,
+                    "position": position,
+                    "layer": layer,
                     "control": control,
                     "qualified_desired_accuracy": (
                         min(1.0, horizon / 60_000 + seed * 0.01)
@@ -475,6 +513,7 @@ def _synthetic_run(
                     ),
                 }
                 for fold in range(3)
+                for position, layer in sites
                 for control in CONTROL_ORDER
             ],
         },

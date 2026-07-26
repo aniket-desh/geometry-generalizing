@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import math
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+
+import numpy as np
 
 from key60_common import (
     CAUSAL_CONTROLS,
@@ -54,6 +57,29 @@ def operator_prefix(run: KeyRun) -> Path:
 
 def causal_prefix(job: CausalJob) -> Path:
     return job.run.path / f"causal_reuse_zz_priority_{job.step:06d}"
+
+
+def _canonical_successor_metadata_valid(
+    metadata: dict[str, object],
+    config: dict[str, object],
+) -> bool:
+    try:
+        order = int(config["task_order"])
+        successor = (np.arange(order, dtype=np.int64) + 1) % order
+        observed = np.asarray(metadata.get("successor_vector"), dtype=np.int64)
+        expected_hash = hashlib.sha256(
+            np.asarray(successor, dtype="<i8").tobytes()
+        ).hexdigest()
+        return (
+            metadata.get("successor_mode") == "latent_label_plus_one"
+            and metadata.get("successor_preregistered") is True
+            and observed.shape == successor.shape
+            and np.array_equal(observed, successor)
+            and metadata.get("successor_sha256") == expected_hash
+            and metadata.get("generator_relation") is None
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _condition_for(task: str, corruption: float) -> str | None:
@@ -279,6 +305,7 @@ def operator_output_valid(run: KeyRun) -> bool:
         or metadata.get("run_name") != config.get("run_name")
         or int(metadata.get("folds", -1)) != 5
         or metadata.get("projection_fit") != "inductive_state_alias_fold"
+        or not _canonical_successor_metadata_valid(metadata, config)
         or not isinstance(records, list)
     ):
         return False
@@ -336,11 +363,22 @@ def causal_output_valid(job: CausalJob) -> bool:
     sites = metadata.get("patch_sites")
     if not isinstance(sites, list) or not sites:
         return False
+    model = config.get("model")
+    if not isinstance(model, dict):
+        return False
     expected_sites = {
+        ("node", 0),
+        ("output", int(model.get("depth", -1))),
+    }
+    if not _canonical_successor_metadata_valid(metadata, config):
+        return False
+    observed_sites = {
         (str(site.get("position")), int(site.get("layer", -1)))
         for site in sites
         if isinstance(site, dict)
     }
+    if observed_sites != expected_sites:
+        return False
     groups: dict[tuple[int, str, int], set[str]] = {}
     for record in records:
         if not isinstance(record, dict):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import shutil
@@ -9,6 +10,8 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import numpy as np
 
 from key60_common import (
     CAUSAL_CONTROLS,
@@ -115,13 +118,13 @@ def _operator_command(run: KeyRun, device: str) -> list[str]:
         "5",
         "--max-dimension",
         "16",
+        "--successor-mode",
+        "latent-cycle",
         "--projection-fit",
         "inductive",
         "--device",
         device,
     ]
-    if run.condition == "random":
-        command.extend(["--generator-relation", "1"])
     return command
 
 
@@ -141,9 +144,11 @@ def _causal_command(job: CausalJob, device: str) -> list[str]:
         "--steps",
         str(job.step),
         "--positions",
-        "output",
+        "node,output",
         "--layers",
-        str(int(config["model"]["depth"])),
+        f"0,{int(config['model']['depth'])}",
+        "--successor-mode",
+        "latent-cycle",
         "--folds",
         str(CAUSAL_FOLDS),
         "--max-dimension",
@@ -224,6 +229,8 @@ def operator_stage(args: argparse.Namespace) -> None:
             "views": ["output"],
             "folds": 5,
             "projection_fit": "inductive_state_alias_fold",
+            "probe": "preregistered canonical latent-label k -> k + 1 cycle",
+            "successor_mode": "latent_label_plus_one",
         },
     )
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -319,7 +326,11 @@ def causal_shard_stage(args: argparse.Namespace) -> None:
             "shard_index": args.shard_index,
             "shard_count": args.shard_count,
             "jobs": [f"{spec[2]}-{spec[3]}-s{spec[4]}-p{HORIZONS[spec[2]]:06d}" for spec in specs],
-            "patch_site": "output residual stream, final layer",
+            "patch_sites": [
+                "input node, layer 0",
+                "output residual stream, final layer",
+            ],
+            "successor_mode": "latent_label_plus_one",
             "folds": CAUSAL_FOLDS,
             "controls": sorted(CAUSAL_CONTROLS),
         },
@@ -375,7 +386,11 @@ def causal_join_stage(args: argparse.Namespace) -> None:
             "completed_at": now(),
             "job_count": len(jobs),
             "horizons": HORIZONS,
-            "patch_site": "output residual stream, final layer",
+            "patch_sites": [
+                "input node, layer 0",
+                "output residual stream, final layer",
+            ],
+            "successor_mode": "latent_label_plus_one",
             "folds": CAUSAL_FOLDS,
             "controls": sorted(CAUSAL_CONTROLS),
             "jobs": [job.slug for job in jobs],
@@ -440,6 +455,20 @@ def finalize_stage(args: argparse.Namespace) -> None:
 
 
 def _write_synthetic_analysis(run: KeyRun) -> None:
+    config = load_json(run.path / "config.json")
+    if not isinstance(config, dict):
+        raise ValueError(f"missing synthetic config: {run.path}")
+    order = int(config["task_order"])
+    successor = (np.arange(order, dtype=np.int64) + 1) % order
+    successor_metadata = {
+        "successor_mode": "latent_label_plus_one",
+        "successor_preregistered": True,
+        "successor_vector": successor.tolist(),
+        "successor_sha256": hashlib.sha256(
+            np.asarray(successor, dtype="<i8").tobytes()
+        ).hexdigest(),
+        "generator_relation": None,
+    }
     prefix = operator_prefix(run)
     records = [
         {
@@ -459,6 +488,7 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
                 "run_name": run.path.name,
                 "folds": 5,
                 "projection_fit": "inductive_state_alias_fold",
+                **successor_metadata,
             },
             "records": records,
         },
@@ -468,16 +498,19 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
     job = CausalJob(run, horizon_for(run))
     prefix = causal_prefix(job)
     checkpoint = f"weights-{job.step:06d}.pt"
+    depth = 1
+    sites = (("node", 0), ("output", depth))
     causal_records = [
         {
             "step": job.step,
             "checkpoint": checkpoint,
             "fold": fold,
-            "position": "output",
-            "layer": 1,
+            "position": position,
+            "layer": layer,
             "control": control,
         }
         for fold in range(CAUSAL_FOLDS)
+        for position, layer in sites
         for control in sorted(CAUSAL_CONTROLS)
     ]
     atomic_json(
@@ -487,7 +520,12 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
                 "run_name": run.path.name,
                 "folds": CAUSAL_FOLDS,
                 "checkpoints": [checkpoint],
-                "patch_sites": [{"position": "output", "layer": 1}],
+                "patch_sites": [
+                    {"position": position, "layer": layer}
+                    for position, layer in sites
+                ],
+                "successor_mode": "latent_label_plus_one",
+                **successor_metadata,
             },
             "records": causal_records,
         },
@@ -508,6 +546,7 @@ def self_test(presets: tuple[str, ...]) -> None:
                     "run_name": run_dir.name,
                     "task": task,
                     "task_corruption_fraction": corruption,
+                    "task_order": 113,
                     "preset": preset,
                     "seed": seed,
                     "split_seed": seed,
