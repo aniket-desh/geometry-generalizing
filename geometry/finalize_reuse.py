@@ -97,6 +97,14 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated presets to include in causal analysis.",
     )
     parser.add_argument(
+        "--skip-causal",
+        action="store_true",
+        help=(
+            "Skip causal execution when validated endpoint shards were run "
+            "separately; their JSON files are still consumed by rendering."
+        ),
+    )
+    parser.add_argument(
         "--output-tag",
         default="zz_final",
         help="Suffix for step-specific analysis outputs inside each run.",
@@ -497,6 +505,7 @@ def main() -> None:
         "device": args.device,
         "min_free_gb": args.min_free_gb,
         "output_tag": args.output_tag,
+        "skip_causal": args.skip_causal,
         "operator_runs": [run.slug for run in operator_runs],
         "causal_runs": [run.slug for run in causal_runs],
         "figure_root": str(args.figure_root),
@@ -517,17 +526,18 @@ def main() -> None:
         min_free_gb=args.min_free_gb,
         output_tag=args.output_tag,
     )
-    run_phase(
-        phase="causal_reuse",
-        script=script_root / "causal_reuse.py",
-        runs=causal_runs,
-        log_root=args.log_root,
-        steps=causal_steps,
-        workers=args.workers,
-        device=args.device,
-        min_free_gb=args.min_free_gb,
-        output_tag=args.output_tag,
-    )
+    if not args.skip_causal:
+        run_phase(
+            phase="causal_reuse",
+            script=script_root / "causal_reuse.py",
+            runs=causal_runs,
+            log_root=args.log_root,
+            steps=causal_steps,
+            workers=args.workers,
+            device=args.device,
+            min_free_gb=args.min_free_gb,
+            output_tag=args.output_tag,
+        )
 
     if free_gb(args.figure_root) < args.min_free_gb:
         raise RuntimeError("disk guard stopped rendering")
