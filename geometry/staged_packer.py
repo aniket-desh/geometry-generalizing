@@ -35,7 +35,12 @@ PROFILES = {
         marker=Path(
             "/workspace/geometry-reuse-logs/finalize-60k/done.json"
         ),
-        required_markers=(),
+        required_markers=(
+            Path(
+                "/workspace/geometry-reuse-logs/"
+                "causal-final-60k/complete.json"
+            ),
+        ),
         roots=(
             Path("/workspace/geometry-reuse-results"),
             Path("/workspace/geometry-reuse-logs"),
@@ -56,6 +61,10 @@ PROFILES = {
             Path(
                 "/workspace/geometry-reuse-extend-logs/"
                 "finalize-150k/done.json"
+            ),
+            Path(
+                "/workspace/geometry-reuse-extend-logs/"
+                "causal-final-150k/complete.json"
             ),
         ),
         roots=(
@@ -116,7 +125,7 @@ def marker_ready(path: Path) -> bool:
         return False
     if path.suffix != ".json":
         return True
-    return load_json(path) is not None
+    return isinstance(load_json(path), dict)
 
 
 def wait_for_markers(settings: Settings, log: Callable[[str], None]) -> None:
@@ -167,30 +176,29 @@ def inventory(roots: tuple[Path, ...]) -> tuple[list[dict[str, object]], int]:
     return records, total
 
 
-def disk_guard(settings: Settings, source_bytes: int) -> None:
+def disk_guard(
+    settings: Settings,
+    *,
+    additional_bytes: int,
+    phase: str,
+) -> None:
     free = shutil.disk_usage(settings.output_root).free
-    required = 2 * source_bytes + 2 * settings.chunk_bytes
-    required += settings.min_free_bytes
+    required = additional_bytes + settings.min_free_bytes
     if free < required:
         raise OSError(
-            f"disk guard: {free / GIB:.2f} GiB free, "
-            f"{required / GIB:.2f} GiB required"
+            f"{phase} disk guard: {free / GIB:.2f} GiB free, "
+            f"{required / GIB:.2f} GiB required before starting"
         )
 
 
 def build_archive(
     archive: Path,
     roots: tuple[Path, ...],
-    inventory_path: Path,
 ) -> None:
     temporary = archive.with_suffix(archive.suffix + ".tmp")
     with tarfile.open(temporary, "w:gz", compresslevel=6) as bundle:
         for root in roots:
             bundle.add(root, arcname=str(root).lstrip("/"))
-        bundle.add(
-            inventory_path,
-            arcname=f"artifact-metadata/{inventory_path.name}",
-        )
     temporary.replace(archive)
 
 
@@ -268,35 +276,91 @@ def upload_temp_sh(
     raise RuntimeError(f"upload failed after {retries} attempts: {wrapper}")
 
 
-def existing_urls(manifest_path: Path) -> dict[str, str]:
+def valid_url(value: object) -> bool:
+    return isinstance(value, str) and TEMP_SH_URL.fullmatch(value) is not None
+
+
+def resumable_parts(
+    manifest_path: Path,
+    *,
+    archive: Path,
+    archive_sha: str,
+    chunk_bytes: int,
+) -> list[dict[str, object]] | None:
     payload = load_json(manifest_path)
-    if not isinstance(payload, dict):
-        return {}
+    if (
+        not isinstance(payload, dict)
+        or payload.get("archive") != str(archive)
+        or payload.get("archive_sha256") != archive_sha
+        or payload.get("archive_bytes") != archive.stat().st_size
+        or payload.get("chunk_bytes") != chunk_bytes
+    ):
+        return None
     parts = payload.get("parts")
-    if not isinstance(parts, list):
-        return {}
-    return {
-        str(part["raw_sha256"]): str(part["url"])
-        for part in parts
-        if isinstance(part, dict) and part.get("raw_sha256") and part.get("url")
-    }
+    if not isinstance(parts, list) or not parts:
+        return None
+    validated: list[dict[str, object]] = []
+    for index, part in enumerate(parts):
+        if not isinstance(part, dict) or part.get("index") != index:
+            return None
+        path = Path(str(part.get("raw_chunk", "")))
+        if (
+            not path.is_file()
+            or path.stat().st_size != part.get("raw_bytes")
+            or path.stat().st_size > chunk_bytes
+            or sha256(path) != part.get("raw_sha256")
+            or (part.get("url") is not None and not valid_url(part.get("url")))
+        ):
+            return None
+        validated.append(dict(part))
+    if sum(int(part["raw_bytes"]) for part in validated) != archive.stat().st_size:
+        return None
+    return validated
 
 
 def completion_valid(path: Path) -> bool:
     payload = load_json(path)
     if not isinstance(payload, dict) or payload.get("status") != "complete":
         return False
+    archive = Path(str(payload.get("archive", "")))
+    if (
+        not archive.is_file()
+        or archive.stat().st_size != payload.get("archive_bytes")
+        or sha256(archive) != payload.get("archive_sha256")
+    ):
+        return False
     parts = payload.get("parts")
-    return (
-        isinstance(parts, list)
-        and bool(parts)
-        and all(
-            isinstance(part, dict)
-            and isinstance(part.get("url"), str)
-            and part["url"].startswith("https://temp.sh/")
-            for part in parts
-        )
+    manifest_parts = resumable_parts(
+        Path(str(payload.get("parts_manifest", ""))),
+        archive=archive,
+        archive_sha=str(payload["archive_sha256"]),
+        chunk_bytes=int(payload.get("chunk_bytes", 0)),
     )
+    if (
+        not isinstance(parts, list)
+        or not parts
+        or manifest_parts is None
+        or len(parts) != len(manifest_parts)
+    ):
+        return False
+    return all(
+        isinstance(part, dict)
+        and valid_url(part.get("url"))
+        and part.get("index") == manifest.get("index")
+        and part.get("raw_sha256") == manifest.get("raw_sha256")
+        and part.get("url") == manifest.get("url")
+        for part, manifest in zip(parts, manifest_parts, strict=True)
+    )
+
+
+def validate_paths(settings: Settings) -> None:
+    output = settings.output_root.resolve()
+    for root in settings.roots:
+        source = root.resolve()
+        if output == source or output.is_relative_to(source):
+            raise ValueError(
+                f"output root {output} must not be inside source root {source}"
+            )
 
 
 def run(
@@ -304,6 +368,7 @@ def run(
     *,
     uploader: Callable[[Path], str] | None = None,
 ) -> Path:
+    validate_paths(settings)
     stage_root = settings.output_root / settings.stage
     stage_root.mkdir(parents=True, exist_ok=True)
     completion_path = stage_root / "complete.json"
@@ -326,27 +391,39 @@ def run(
         return completion_path
 
     wait_for_markers(settings, log)
-    records, source_bytes = inventory(settings.roots)
     inventory_path = stage_root / "inventory.json"
-    atomic_json(
-        inventory_path,
-        {
-            "created_at": now(),
-            "marker": str(settings.marker),
-            "required_markers": [
-                str(path) for path in settings.required_markers
-            ],
-            "roots": [str(path) for path in settings.roots],
-            "file_count": len(records),
-            "source_bytes": source_bytes,
-            "files": records,
-        },
-    )
-    disk_guard(settings, source_bytes)
-
-    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    archive = stage_root / f"{settings.archive_prefix}-{stamp}.tar.gz"
-    build_archive(archive, settings.roots, inventory_path)
+    archive = stage_root / f"{settings.archive_prefix}.tar.gz"
+    if archive.exists():
+        if not inventory_path.exists():
+            raise RuntimeError(
+                f"archive exists without its inventory: {archive}"
+            )
+        log(f"resuming retained archive: {archive}")
+    else:
+        records, source_bytes = inventory(settings.roots)
+        atomic_json(
+            inventory_path,
+            {
+                "created_at": now(),
+                "marker": str(settings.marker),
+                "required_markers": [
+                    str(path) for path in settings.required_markers
+                ],
+                "roots": [str(path) for path in settings.roots],
+                "file_count": len(records),
+                "source_bytes": source_bytes,
+                "files": records,
+            },
+        )
+        tar_overhead = (len(records) + len(settings.roots) + 1024) * 4096
+        disk_guard(
+            settings,
+            additional_bytes=source_bytes
+            + source_bytes // 50
+            + tar_overhead,
+            phase="archive",
+        )
+        build_archive(archive, settings.roots)
     archive_sha = sha256(archive)
     archive_sha_path = archive.with_suffix(archive.suffix + ".sha256")
     archive_sha_path.write_text(f"{archive_sha}  {archive.name}\n")
@@ -355,17 +432,24 @@ def run(
         f"({archive.stat().st_size} bytes, sha256={archive_sha})"
     )
 
-    chunks = split_archive(
-        archive,
-        stage_root / f"{archive.name}.parts",
-        settings.chunk_bytes,
+    disk_guard(
+        settings,
+        additional_bytes=archive.stat().st_size + 2 * settings.chunk_bytes,
+        phase="chunk",
     )
     manifest_path = stage_root / "parts.json"
-    resumed = existing_urls(manifest_path)
-    for part in chunks:
-        previous_url = resumed.get(str(part["raw_sha256"]))
-        if previous_url:
-            part["url"] = previous_url
+    chunks = resumable_parts(
+        manifest_path,
+        archive=archive,
+        archive_sha=archive_sha,
+        chunk_bytes=settings.chunk_bytes,
+    )
+    if chunks is None:
+        chunks = split_archive(
+            archive,
+            stage_root / f"{archive.name}.parts",
+            settings.chunk_bytes,
+        )
 
     def write_manifest() -> None:
         atomic_json(
@@ -383,7 +467,7 @@ def run(
 
     write_manifest()
     for part in chunks:
-        if part["url"]:
+        if valid_url(part["url"]):
             continue
         raw_chunk = Path(str(part["raw_chunk"]))
         wrapper = Path(str(part["wrapper"]))
@@ -397,7 +481,7 @@ def run(
             )
         else:
             url = uploader(wrapper)
-        if not url.startswith("https://temp.sh/"):
+        if not valid_url(url):
             raise RuntimeError(f"uploader returned an invalid URL: {url}")
         part["wrapper_bytes"] = wrapper.stat().st_size
         part["url"] = url
@@ -405,7 +489,7 @@ def run(
         wrapper.unlink()
         log(f"uploaded part {part['index'] + 1}/{len(chunks)}: {url}")
 
-    if not all(part.get("url") for part in chunks):
+    if not all(valid_url(part.get("url")) for part in chunks):
         raise RuntimeError("refusing to complete with missing part URLs")
     atomic_json(
         completion_path,
@@ -418,6 +502,7 @@ def run(
             "archive_bytes": archive.stat().st_size,
             "archive_sha256": archive_sha,
             "archive_sha256_file": str(archive_sha_path),
+            "chunk_bytes": settings.chunk_bytes,
             "inventory": str(inventory_path),
             "parts_manifest": str(manifest_path),
             "sources_deleted": False,
@@ -472,8 +557,9 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
             "provide --profile or explicit --stage, --marker, --root, "
             "and --archive-prefix"
         )
+    if not 1 <= args.chunk_mib <= 42:
+        raise ValueError("--chunk-mib must be between 1 and 42")
     if min(
-        args.chunk_mib,
         args.min_free_gib,
         args.poll_seconds,
         args.timeout_hours,
@@ -548,6 +634,16 @@ def self_test() -> None:
         assert hashlib.sha256(reconstructed).hexdigest() == payload[
             "archive_sha256"
         ]
+        with tarfile.open(Path(str(payload["archive"])), "r:gz") as bundle:
+            assert not any(
+                member.name.startswith("artifact-metadata/")
+                for member in bundle.getmembers()
+            )
+
+        def fail_upload(_: Path) -> str:
+            raise AssertionError("completed stage attempted another upload")
+
+        assert run(settings, uploader=fail_upload) == completion
         assert (source / "small.json").exists()
     print("self-test passed")
 
