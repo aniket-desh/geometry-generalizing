@@ -99,7 +99,7 @@ def compute_geometry(
     chunk_size: int,
     output_path: Path,
 ) -> dict[str, np.ndarray]:
-    w_out = adapter.w_out
+    w_out = adapter.w_out.float()
     w_u = adapter.w_u.float()
     vocab_size = w_u.shape[1]
 
@@ -215,7 +215,7 @@ def evaluate_pruning_curves(
     residual_all = cache["residual"]
     acts_all = cache["activations"]
     labels_all = cache["labels"]
-    w_out = adapter.w_out.float()
+    w_out = adapter.w_out
 
     for start in range(0, residual_all.shape[0], token_batch_size):
         stop = min(start + token_batch_size, residual_all.shape[0])
