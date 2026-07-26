@@ -835,18 +835,23 @@ def main() -> None:
         )
         for view in views:
             for layer, activations in enumerate(extracted[view]):
-                result = analyze_activation_layer(
-                    activations,
-                    max_dimension=args.max_dimension,
-                    max_frequencies=args.max_frequencies,
-                    powers=powers,
-                    folds=args.folds,
-                    fold_seed=args.fold_seed,
-                    state_train_fraction=args.state_train_fraction,
-                    alias_train_fraction=args.alias_train_fraction,
-                    inner_train_fraction=args.inner_train_fraction,
-                    precision=args.precision,
-                )
+                try:
+                    result = analyze_activation_layer(
+                        activations,
+                        max_dimension=args.max_dimension,
+                        max_frequencies=args.max_frequencies,
+                        powers=powers,
+                        folds=args.folds,
+                        fold_seed=args.fold_seed,
+                        state_train_fraction=args.state_train_fraction,
+                        alias_train_fraction=args.alias_train_fraction,
+                        inner_train_fraction=args.inner_train_fraction,
+                        precision=args.precision,
+                    )
+                except ValueError as error:
+                    if "zero rank" not in str(error):
+                        raise
+                    result = {"status": str(error), "folds": []}
                 records.append(
                     {
                         "step": step,
