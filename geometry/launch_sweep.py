@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
             "anchor",
             "breadth-pilot",
             "breadth-extend",
+            "breadth-confirm",
             "breadth-diagnostics",
             "breadth",
             "scale",
@@ -114,6 +115,23 @@ def matrix(profile: str) -> list[Run]:
                 dense_checkpoint_every=500,
             )
             for task in BREADTH_PILOT_TASKS
+        ]
+    if profile == "breadth-confirm":
+        return [
+            Run(
+                task,
+                "micro",
+                seed,
+                60_000,
+                4096,
+                eval_every=250,
+                snapshot_every=500,
+                checkpoint_every=3_000,
+                keep_checkpoints=2,
+                dense_checkpoint_every=500,
+            )
+            for task in ("cycle24", "cycle31", "random31")
+            for seed in (1, 2)
         ]
     if profile == "breadth-diagnostics":
         return [
@@ -261,6 +279,7 @@ def main() -> None:
     default_output_root = {
         "breadth-pilot": "/workspace/geometry-breadth-results",
         "breadth-extend": "/workspace/geometry-breadth-results",
+        "breadth-confirm": "/workspace/geometry-breadth-results",
         "breadth-diagnostics": (
             "/workspace/geometry-breadth-diagnostic-results"
         ),
@@ -270,6 +289,7 @@ def main() -> None:
         {
             "breadth-pilot": "/workspace/geometry-breadth-logs",
             "breadth-extend": "/workspace/geometry-breadth-extend-logs",
+            "breadth-confirm": "/workspace/geometry-breadth-confirm-logs",
             "breadth-diagnostics": (
                 "/workspace/geometry-breadth-diagnostic-logs"
             ),
