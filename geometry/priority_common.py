@@ -14,6 +14,7 @@ import numpy as np
 from key60_common import (
     CAUSAL_CONTROLS,
     CAUSAL_FOLDS,
+    CAUSAL_RECORD_CONTROLS,
     KEY_CONDITIONS,
     PRESETS,
     SEEDS,
@@ -416,7 +417,11 @@ def causal_output_valid(job: CausalJob) -> bool:
     return (
         set(range(CAUSAL_FOLDS)) == {key[0] for key in groups}
         and expected_sites == {(key[1], key[2]) for key in groups}
-        and all(controls == CAUSAL_CONTROLS for controls in groups.values())
+        and all(
+            CAUSAL_CONTROLS.issubset(controls)
+            and controls.issubset(CAUSAL_RECORD_CONTROLS)
+            for controls in groups.values()
+        )
         and all(
             path.is_file() and path.stat().st_size > 0
             for path in (prefix.with_suffix(".jsonl"), prefix.with_suffix(".csv"))

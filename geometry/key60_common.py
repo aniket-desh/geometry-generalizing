@@ -29,6 +29,10 @@ CAUSAL_CONTROLS = {
     "scrambled_successor",
     "random_orthogonal",
 }
+CAUSAL_RECORD_CONTROLS = CAUSAL_CONTROLS | {
+    "source",
+    "natural_shift",
+}
 
 
 @dataclass(frozen=True)
@@ -401,7 +405,11 @@ def causal_output_valid(job: CausalJob) -> bool:
         return False
     if expected_sites != {(key[1], key[2]) for key in groups}:
         return False
-    if any(controls != CAUSAL_CONTROLS for controls in groups.values()):
+    if any(
+        not CAUSAL_CONTROLS.issubset(controls)
+        or not controls.issubset(CAUSAL_RECORD_CONTROLS)
+        for controls in groups.values()
+    ):
         return False
     return all(
         path.is_file() and path.stat().st_size > 0

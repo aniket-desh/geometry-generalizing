@@ -16,6 +16,7 @@ import numpy as np
 from key60_common import (
     CAUSAL_CONTROLS,
     CAUSAL_FOLDS,
+    CAUSAL_RECORD_CONTROLS,
     KEY_CONDITIONS,
     PRESETS,
     SEEDS,
@@ -518,7 +519,7 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
         }
         for fold in range(CAUSAL_FOLDS)
         for position, layer in sites
-        for control in sorted(CAUSAL_CONTROLS)
+        for control in sorted(CAUSAL_RECORD_CONTROLS)
     ]
     atomic_json(
         prefix.with_suffix(".json"),

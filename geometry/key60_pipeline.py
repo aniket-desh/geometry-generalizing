@@ -14,6 +14,7 @@ from pathlib import Path
 from key60_common import (
     CAUSAL_CONTROLS,
     CAUSAL_FOLDS,
+    CAUSAL_RECORD_CONTROLS,
     FINAL_STEP,
     KEY_CONDITIONS,
     KEY_COUNT,
@@ -573,7 +574,7 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
                 "control": control,
             }
             for fold in range(CAUSAL_FOLDS)
-            for control in sorted(CAUSAL_CONTROLS)
+            for control in sorted(CAUSAL_RECORD_CONTROLS)
         ]
         atomic_json(
             prefix.with_suffix(".json"),
