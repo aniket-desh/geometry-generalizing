@@ -18,7 +18,13 @@ from key60_common import (
     SEEDS,
     KeyRun,
 )
-from priority_common import BATCH_SIZE_BY_PRESET, HORIZONS, operator_steps_for
+from priority_common import (
+    BATCH_SIZE_BY_PRESET,
+    HORIZONS,
+    MIN_QUALIFIED_CAUSAL_EXAMPLES,
+    causal_evidence_metric,
+    operator_steps_for,
+)
 
 
 SUITE_PRESETS = {
@@ -38,11 +44,6 @@ REFERENCE_CAUSAL_CONTROLS = (
 BASELINE_CAUSAL_CONTROLS = (
     "source",
     "natural_shift",
-)
-CAUSAL_METRIC_PRIORITY = (
-    "qualified_desired_accuracy",
-    "probability_recovery",
-    "desired_accuracy",
 )
 OPERATOR_STEM = "operator_reuse_zz_priority"
 
@@ -540,15 +541,10 @@ def _operator_summary(
 
 
 def _causal_metric(record: dict[str, object], *, label: str) -> tuple[float, str]:
-    for key in CAUSAL_METRIC_PRIORITY:
-        value = record.get(key)
-        if value is None:
-            continue
-        try:
-            return _finite(value, label=f"{label} {key}"), key
-        except EvidenceError:
-            continue
-    raise EvidenceError(f"{label} has no finite causal success metric")
+    try:
+        return causal_evidence_metric(record)
+    except ValueError as error:
+        raise EvidenceError(f"{label}: {error}") from error
 
 
 def _median(values: Iterable[float]) -> float:
@@ -870,6 +866,12 @@ def summarize(
                 "validated_operator_outputs": len(run_summaries),
                 "validated_causal_outputs": len(run_summaries),
             },
+            "causal_metric": {
+                "minimum_qualified_examples": MIN_QUALIFIED_CAUSAL_EXAMPLES,
+                "qualified_metric": "qualified_desired_accuracy",
+                "fallback_metric": "desired_accuracy",
+                "probability_recovery_used": False,
+            },
         },
         "definitions": {
             "first_90_percent_step": (
@@ -894,8 +896,10 @@ def summarize(
                 "shared canonical-successor code length, evaluated on held-out aliases"
             ),
             "causal_success": (
-                "median across three folds, using qualified_desired_accuracy "
-                "when finite, then probability_recovery, then desired_accuracy"
+                "median across three folds; use qualified_desired_accuracy only "
+                f"with at least {MIN_QUALIFIED_CAUSAL_EXAMPLES} qualified examples, "
+                "otherwise use bounded desired_accuracy across all evaluated "
+                "examples; probability_recovery is excluded"
             ),
             "negative_control_max": (
                 "maximum of scrambled-successor and norm-matched random-orthogonal "
@@ -1190,7 +1194,16 @@ def _synthetic_fixture(root: Path, *, suite: str = "core") -> None:
                                     "position": position,
                                     "layer": layer,
                                     "control": control,
-                                    "qualified_desired_accuracy": value + 0.01 * fold,
+                                    "qualified_examples": 128,
+                                    "qualified_desired_accuracy": min(
+                                        1.0,
+                                        value + 0.01 * fold,
+                                    ),
+                                    "desired_accuracy": min(
+                                        1.0,
+                                        value + 0.01 * fold,
+                                    ),
+                                    "probability_recovery": 8.0,
                                 }
                             )
                 causal_prefix = (

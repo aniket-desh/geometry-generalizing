@@ -38,6 +38,60 @@ BATCH_SIZE_BY_PRESET = {
     "large": 1_024,
 }
 BASE_OPERATOR_STEPS = (10_000, 30_000)
+MIN_QUALIFIED_CAUSAL_EXAMPLES = 64
+
+
+def _bounded_causal_accuracy(
+    record: dict[str, object],
+    key: str,
+) -> float | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    try:
+        accuracy = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{key} is not numeric") from error
+    if not math.isfinite(accuracy):
+        return None
+    if not 0.0 <= accuracy <= 1.0:
+        raise ValueError(f"{key} is outside [0, 1]")
+    return accuracy
+
+
+def causal_evidence_metric(
+    record: dict[str, object],
+) -> tuple[float, str]:
+    raw_qualified = record.get("qualified_examples")
+    if raw_qualified is None:
+        qualified_examples = 0
+    else:
+        try:
+            qualified_number = float(raw_qualified)
+        except (TypeError, ValueError) as error:
+            raise ValueError("qualified_examples is not numeric") from error
+        if (
+            not math.isfinite(qualified_number)
+            or qualified_number < 0
+            or not qualified_number.is_integer()
+        ):
+            raise ValueError("qualified_examples is not a nonnegative integer")
+        qualified_examples = int(qualified_number)
+
+    if qualified_examples >= MIN_QUALIFIED_CAUSAL_EXAMPLES:
+        qualified_accuracy = _bounded_causal_accuracy(
+            record,
+            "qualified_desired_accuracy",
+        )
+        if qualified_accuracy is not None:
+            return qualified_accuracy, "qualified_desired_accuracy"
+
+    desired_accuracy = _bounded_causal_accuracy(record, "desired_accuracy")
+    if desired_accuracy is not None:
+        return desired_accuracy, "desired_accuracy"
+    raise ValueError(
+        "no bounded causal accuracy is available under the qualified-support policy"
+    )
 
 
 def horizon_for(run: KeyRun) -> int:

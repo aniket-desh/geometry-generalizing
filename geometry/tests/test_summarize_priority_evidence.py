@@ -9,12 +9,60 @@ from pathlib import Path
 from summarize_priority_evidence import (
     EvidenceError,
     OPERATOR_STEM,
+    _causal_metric,
     _synthetic_fixture,
     summarize,
 )
 
 
 class PriorityEvidenceSummaryTest(unittest.TestCase):
+    def test_causal_metric_requires_qualified_support(self) -> None:
+        value, key = _causal_metric(
+            {
+                "qualified_examples": 64,
+                "qualified_desired_accuracy": 0.8,
+                "desired_accuracy": 0.2,
+                "probability_recovery": 9.0,
+            },
+            label="supported",
+        )
+        self.assertEqual(key, "qualified_desired_accuracy")
+        self.assertAlmostEqual(value, 0.8)
+
+        value, key = _causal_metric(
+            {
+                "qualified_examples": 63,
+                "qualified_desired_accuracy": 0.8,
+                "desired_accuracy": 0.2,
+                "probability_recovery": 9.0,
+            },
+            label="unsupported",
+        )
+        self.assertEqual(key, "desired_accuracy")
+        self.assertAlmostEqual(value, 0.2)
+
+    def test_causal_metric_excludes_probability_recovery(self) -> None:
+        value, key = _causal_metric(
+            {
+                "qualified_examples": 0,
+                "qualified_desired_accuracy": float("nan"),
+                "desired_accuracy": 0.01,
+                "probability_recovery": -3.0,
+            },
+            label="zero support",
+        )
+        self.assertEqual(key, "desired_accuracy")
+        self.assertAlmostEqual(value, 0.01)
+
+        with self.assertRaisesRegex(EvidenceError, "no bounded causal accuracy"):
+            _causal_metric(
+                {
+                    "qualified_examples": 0,
+                    "probability_recovery": 0.5,
+                },
+                label="ratio only",
+            )
+
     def test_synthetic_matrix_metrics(self) -> None:
         with tempfile.TemporaryDirectory(prefix="priority-summary-test-") as temporary:
             root = Path(temporary)

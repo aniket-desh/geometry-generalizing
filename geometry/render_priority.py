@@ -19,6 +19,8 @@ from matplotlib.ticker import PercentFormatter
 from key60_common import KEY_CONDITIONS, PRESETS, SEEDS, CausalJob, KeyRun, atomic_json, load_json
 from priority_common import (
     HORIZONS,
+    MIN_QUALIFIED_CAUSAL_EXAMPLES,
+    causal_evidence_metric,
     causal_output_valid,
     causal_prefix,
     causal_schedule,
@@ -183,6 +185,13 @@ def _caption_payload(
         f"{seed_policy} Straight segments connect paired measurements within "
         "each seed, with no smoothing."
     )
+    causal_metric_policy = (
+        "Each fold reports target accuracy on the qualified subset only when "
+        f"that subset contains at least {MIN_QUALIFIED_CAUSAL_EXAMPLES} examples; "
+        "otherwise it reports absolute target accuracy across all evaluated "
+        "examples. Probability-recovery ratios are excluded because a near-zero "
+        "natural-shift gain makes them unstable."
+    )
     return {
         "suite": suite,
         "presets": list(presets),
@@ -191,6 +200,13 @@ def _caption_payload(
             "successor_mode": "latent_label_plus_one",
             "definition": "latent label k maps to (k + 1) mod n",
             "orientation": "fixed before activation inspection",
+        },
+        "causal_metric": {
+            "minimum_qualified_examples": MIN_QUALIFIED_CAUSAL_EXAMPLES,
+            "qualified_metric": "qualified_desired_accuracy",
+            "fallback_metric": "desired_accuracy",
+            "probability_recovery_used": False,
+            "definition": causal_metric_policy,
         },
         "mixed_horizons": {
             "clean": 60_000,
@@ -217,7 +233,7 @@ def _caption_payload(
                     "Canonical-cycle intervention success at the input-state "
                     "activation before the first transformer block (node 0) "
                     "and at the output residual stream after the final block "
-                    f"(output final). {paired_policy} {common}"
+                    f"(output final). {causal_metric_policy} {paired_policy} {common}"
                 ),
             },
             controls_name: {
@@ -227,7 +243,8 @@ def _caption_payload(
                     "output residual stream after the final transformer block "
                     "(output final). Exact-state and target-centroid controls "
                     "are label-informed references; scrambled-successor and "
-                    f"random-orthogonal controls test specificity. {paired_policy} {common}"
+                    "random-orthogonal controls test specificity. "
+                    f"{causal_metric_policy} {paired_policy} {common}"
                 ),
             },
         },
@@ -370,24 +387,16 @@ def _causal_value(
             f"missing causal {control} at {position} layer {layer}, "
             f"step {step} for {run.slug}"
         )
-    values = []
+    values: list[float] = []
     for record in candidates:
-        value = next(
-            (
-                candidate
-                for key in (
-                    "qualified_desired_accuracy",
-                    "probability_recovery",
-                    "desired_accuracy",
-                )
-                if (candidate := _finite(record.get(key))) is not None
-            ),
-            None,
-        )
-        if value is not None:
-            values.append(value)
-    if not values:
-        raise ValueError(f"causal metric absent for {run.slug}")
+        try:
+            value, _ = causal_evidence_metric(record)
+        except ValueError as error:
+            raise ValueError(
+                f"invalid causal metric for {run.slug} at {position} "
+                f"layer {layer}, fold {record.get('fold')}: {error}"
+            ) from error
+        values.append(value)
     return float(np.median(values))
 
 
@@ -810,6 +819,12 @@ def render(
             },
             "folds": 3,
             "controls": list(CONTROL_ORDER),
+            "metric_policy": {
+                "minimum_qualified_examples": MIN_QUALIFIED_CAUSAL_EXAMPLES,
+                "qualified_metric": "qualified_desired_accuracy",
+                "fallback_metric": "desired_accuracy",
+                "probability_recovery_used": False,
+            },
         },
         "gates": gates,
         "render_policy": {
@@ -942,6 +957,7 @@ def _synthetic_run(
         "scrambled_successor": 0.04,
         "random_orthogonal": 0.03,
     }
+    qualified_examples = 0 if condition == "random" else 128
     atomic_json(
         prefix.with_suffix(".json"),
         {
@@ -964,7 +980,25 @@ def _synthetic_run(
                     "position": position,
                     "layer": layer,
                     "control": control,
-                    "qualified_desired_accuracy": float(
+                    "qualified_examples": qualified_examples,
+                    "qualified_desired_accuracy": (
+                        None
+                        if condition == "random"
+                        else float(
+                            np.clip(
+                                (
+                                    canonical_base[position]
+                                    if control == "learned_generator"
+                                    else control_base[control]
+                                )
+                                + (seed - 1) * 0.02
+                                + (fold - 1) * 0.006,
+                                0.0,
+                                1.0,
+                            )
+                        )
+                    ),
+                    "desired_accuracy": float(
                         np.clip(
                             (
                                 canonical_base[position]
@@ -977,6 +1011,7 @@ def _synthetic_run(
                             1.0,
                         )
                     ),
+                    "probability_recovery": 4.0 if condition == "random" else 0.5,
                 }
                 for fold in range(3)
                 for position, layer in sites
@@ -1036,6 +1071,15 @@ def self_test(
         or policy.get("smoothing") is not False
     ):
         raise AssertionError("spaghetti render policy is not explicit")
+    causal_policy = manifest.get("causal_schedule", {}).get("metric_policy")
+    if (
+        not isinstance(causal_policy, dict)
+        or causal_policy.get("minimum_qualified_examples")
+        != MIN_QUALIFIED_CAUSAL_EXAMPLES
+        or causal_policy.get("fallback_metric") != "desired_accuracy"
+        or causal_policy.get("probability_recovery_used") is not False
+    ):
+        raise AssertionError("causal evidence policy is not explicit")
     captions = load_json(figures / f"{suite}-figure-captions.json")
     if (
         not isinstance(captions, dict)
@@ -1059,6 +1103,18 @@ def self_test(
         raise AssertionError(
             "endpoint summary obscures horizons, causal sites, or reuse scope"
         )
+    random_records = [
+        record
+        for record in summary
+        if isinstance(record, dict) and record.get("condition") == "random"
+    ]
+    if any(
+        not 0.0
+        <= float(record["canonical_cycle_output_final_causal_success_median"])
+        <= 1.0
+        for record in random_records
+    ):
+        raise AssertionError("zero-support causal controls used an unstable ratio")
     operator_probe = manifest.get("operator_probe")
     if (
         not isinstance(operator_probe, dict)
