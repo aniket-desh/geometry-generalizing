@@ -23,6 +23,13 @@ BREADTH_PILOT_TASKS = (
     "cycle31",
 )
 
+BREADTH_REPLICATION_TASKS = (
+    "torus5",
+    "cycle31",
+    "random31",
+    "dihedral12",
+)
+
 
 @dataclass(frozen=True)
 class Run:
@@ -53,6 +60,7 @@ def parse_args() -> argparse.Namespace:
             "breadth-pilot",
             "breadth-extend",
             "breadth-confirm",
+            "breadth-replicate",
             "breadth-diagnostics",
             "breadth",
             "scale",
@@ -71,7 +79,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-free-gb", type=float, default=8.0)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
 
@@ -131,6 +142,23 @@ def matrix(profile: str) -> list[Run]:
                 dense_checkpoint_every=500,
             )
             for task in ("cycle24", "cycle31", "random31")
+            for seed in (1, 2)
+        ]
+    if profile == "breadth-replicate":
+        return [
+            Run(
+                task,
+                "micro",
+                seed,
+                60_000,
+                4096,
+                eval_every=500,
+                snapshot_every=1_000,
+                checkpoint_every=15_000,
+                keep_checkpoints=2,
+                dense_checkpoint_every=1_000,
+            )
+            for task in BREADTH_REPLICATION_TASKS
             for seed in (1, 2)
         ]
     if profile == "breadth-diagnostics":
@@ -197,29 +225,13 @@ def matrix(profile: str) -> list[Run]:
     raise ValueError(profile)
 
 
-def run_one(
+def command_for(
     run: Run,
     *,
     output_root: Path,
-    log_root: Path,
     compile_model: bool,
     device: str,
-    min_free_gb: float,
-) -> dict[str, object]:
-    slug = f"{run.task}-{run.preset}-s{run.seed}"
-    log_path = log_root / f"{slug}.log"
-    available = shutil.disk_usage(output_root).free / (1024**3)
-    if available < min_free_gb:
-        return {
-            **asdict(run),
-            "returncode": 75,
-            "elapsed_seconds": 0.0,
-            "error": (
-                f"disk guard: {available:.1f} GiB free is below "
-                f"{min_free_gb:.1f} GiB"
-            ),
-            "log": str(log_path),
-        }
+) -> list[str]:
     command = [
         sys.executable,
         str(Path(__file__).with_name("train.py")),
@@ -228,6 +240,12 @@ def run_one(
         "--preset",
         run.preset,
         "--seed",
+        str(run.seed),
+        "--split-seed",
+        str(run.seed),
+        "--task-seed",
+        str(run.seed),
+        "--token-seed",
         str(run.seed),
         "--steps",
         str(run.steps),
@@ -263,6 +281,38 @@ def run_one(
     ]
     if compile_model:
         command.append("--compile")
+    return command
+
+
+def run_one(
+    run: Run,
+    *,
+    output_root: Path,
+    log_root: Path,
+    compile_model: bool,
+    device: str,
+    min_free_gb: float,
+) -> dict[str, object]:
+    slug = f"{run.task}-{run.preset}-s{run.seed}"
+    log_path = log_root / f"{slug}.log"
+    available = shutil.disk_usage(output_root).free / (1024**3)
+    if available < min_free_gb:
+        return {
+            **asdict(run),
+            "returncode": 75,
+            "elapsed_seconds": 0.0,
+            "error": (
+                f"disk guard: {available:.1f} GiB free is below "
+                f"{min_free_gb:.1f} GiB"
+            ),
+            "log": str(log_path),
+        }
+    command = command_for(
+        run,
+        output_root=output_root,
+        compile_model=compile_model,
+        device=device,
+    )
     started = time.time()
     with log_path.open("w") as log:
         result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
@@ -274,12 +324,73 @@ def run_one(
     }
 
 
+def select_shard(runs: list[Run], index: int, count: int) -> list[Run]:
+    if count < 1:
+        raise ValueError("--shard-count must be positive")
+    if index < 0 or index >= count:
+        raise ValueError("--shard-index must lie in [0, shard-count)")
+    return runs[index::count]
+
+
+def self_test() -> None:
+    runs = matrix("breadth-replicate")
+    expected = {
+        (task, seed)
+        for task in ("torus5", "cycle31", "dihedral12", "random31")
+        for seed in (1, 2)
+    }
+    identities = [(run.task, run.seed) for run in runs]
+    if len(identities) != len(set(identities)):
+        raise AssertionError("breadth replication identities are not unique")
+    if set(identities) != expected:
+        raise AssertionError("breadth replication coverage is incomplete")
+    for run in runs:
+        if (
+            run.preset != "micro"
+            or run.steps != 60_000
+            or run.batch_size != 4_096
+            or run.train_fraction != 0.4
+            or run.weight_decay != 1.0
+            or run.aliases != 4
+            or run.contexts != 16
+            or run.eval_contexts != 8
+            or run.eval_every != 500
+            or run.snapshot_every != 1_000
+            or run.checkpoint_every != 15_000
+            or run.keep_checkpoints != 2
+            or run.dense_checkpoint_every != 1_000
+        ):
+            raise AssertionError(f"unexpected replication protocol: {run}")
+        command = command_for(
+            run,
+            output_root=Path("/tmp/breadth-replication-self-test"),
+            compile_model=True,
+            device="cuda",
+        )
+        for option in ("--seed", "--split-seed", "--task-seed", "--token-seed"):
+            if command.count(option) != 1:
+                raise AssertionError(f"{option} is missing or duplicated")
+            if command[command.index(option) + 1] != str(run.seed):
+                raise AssertionError(f"{option} does not match the run seed")
+    shards = [select_shard(runs, index, 4) for index in range(4)]
+    flattened = [run for shard in shards for run in shard]
+    if len(flattened) != 8 or set(flattened) != set(runs):
+        raise AssertionError("four-shard coverage is incomplete or duplicated")
+    if any(len(shard) != 2 for shard in shards):
+        raise AssertionError("four-shard schedule is imbalanced")
+    print("breadth-replicate self-test passed: 8 unique runs across 4 shards")
+
+
 def main() -> None:
     args = parse_args()
+    if args.self_test:
+        self_test()
+        return
     default_output_root = {
         "breadth-pilot": "/workspace/geometry-breadth-results",
         "breadth-extend": "/workspace/geometry-breadth-results",
         "breadth-confirm": "/workspace/geometry-breadth-results",
+        "breadth-replicate": "/workspace/geometry-breadth-results",
         "breadth-diagnostics": (
             "/workspace/geometry-breadth-diagnostic-results"
         ),
@@ -290,6 +401,9 @@ def main() -> None:
             "breadth-pilot": "/workspace/geometry-breadth-logs",
             "breadth-extend": "/workspace/geometry-breadth-extend-logs",
             "breadth-confirm": "/workspace/geometry-breadth-confirm-logs",
+            "breadth-replicate": (
+                "/workspace/geometry-breadth-replication-logs"
+            ),
             "breadth-diagnostics": (
                 "/workspace/geometry-breadth-diagnostic-logs"
             ),
@@ -297,7 +411,10 @@ def main() -> None:
     )
     output_root.mkdir(parents=True, exist_ok=True)
     log_root.mkdir(parents=True, exist_ok=True)
-    runs = matrix(args.profile)
+    all_runs = matrix(args.profile)
+    runs = select_shard(all_runs, args.shard_index, args.shard_count)
+    if not runs:
+        raise ValueError("selected shard contains no runs")
     manifest = {
         "profile": args.profile,
         "workers": args.workers,
@@ -306,6 +423,9 @@ def main() -> None:
         "output_root": str(output_root),
         "log_root": str(log_root),
         "min_free_gb": args.min_free_gb,
+        "shard_index": args.shard_index,
+        "shard_count": args.shard_count,
+        "full_run_count": len(all_runs),
         "runs": [asdict(run) for run in runs],
     }
     if args.profile == "breadth-diagnostics":
@@ -317,7 +437,15 @@ def main() -> None:
                 "1/6. Compare operation tables, not the legacy field."
             )
         }
-    (log_root / f"{args.profile}-manifest.json").write_text(
+    manifest_name = (
+        f"{args.profile}-manifest.json"
+        if args.shard_count == 1
+        else (
+            f"{args.profile}-manifest-"
+            f"{args.shard_index:02d}-of-{args.shard_count:02d}.json"
+        )
+    )
+    (log_root / manifest_name).write_text(
         json.dumps(manifest, indent=2) + "\n"
     )
     if args.dry_run:
@@ -349,7 +477,15 @@ def main() -> None:
                 f"rc={result['returncode']} in {result['elapsed_seconds']:.1f}s",
                 flush=True,
             )
-    (log_root / f"{args.profile}-results.json").write_text(
+    results_name = (
+        f"{args.profile}-results.json"
+        if args.shard_count == 1
+        else (
+            f"{args.profile}-results-"
+            f"{args.shard_index:02d}-of-{args.shard_count:02d}.json"
+        )
+    )
+    (log_root / results_name).write_text(
         json.dumps(results, indent=2) + "\n"
     )
     failures = [result for result in results if result["returncode"] != 0]
