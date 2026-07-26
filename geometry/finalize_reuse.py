@@ -77,6 +77,30 @@ def parse_args() -> argparse.Namespace:
         default=Path("/workspace/geometry-reuse-figures"),
     )
     parser.add_argument("--final-step", type=int, default=150_000)
+    parser.add_argument(
+        "--expected-matrix",
+        choices=("full64", "manifest"),
+        default="full64",
+        help=(
+            "Require the canonical 64-run matrix, or trust the exact nonempty "
+            "subset recorded in the supplied confirmation manifest."
+        ),
+    )
+    parser.add_argument(
+        "--operator-presets",
+        default="grok",
+        help="Comma-separated presets to include in operator analysis.",
+    )
+    parser.add_argument(
+        "--causal-presets",
+        default="grok",
+        help="Comma-separated presets to include in causal analysis.",
+    )
+    parser.add_argument(
+        "--output-tag",
+        default="zz_final",
+        help="Suffix for step-specific analysis outputs inside each run.",
+    )
     parser.add_argument("--step-every", type=int, default=10_000)
     parser.add_argument(
         "--causal-step-every",
@@ -125,7 +149,7 @@ def condition_for(task: str, corruption: float) -> str:
 
 
 def expected_specs(
-    manifest_path: Path, *, final_step: int
+    manifest_path: Path, *, final_step: int, expected_matrix: str
 ) -> list[dict[str, object]] | None:
     payload = load_json(manifest_path)
     if not isinstance(payload, dict) or payload.get("profile") != "confirmation":
@@ -150,7 +174,14 @@ def expected_specs(
         for preset in ("grok", "micro")
         for seed in range(4)
     }
-    if expected != canonical:
+    if len(expected) != len(runs):
+        raise ValueError("confirmation manifest contains duplicate runs")
+    if not expected.issubset(canonical):
+        raise ValueError(
+            f"confirmation manifest contains unexpected runs: "
+            f"{sorted(expected - canonical)}"
+        )
+    if expected_matrix == "full64" and expected != canonical:
         missing = sorted(canonical - expected)
         extra = sorted(expected - canonical)
         raise ValueError(
@@ -235,7 +266,9 @@ def wait_for_confirmation(args: argparse.Namespace) -> list[Run]:
     last_message = 0.0
     while time.monotonic() < deadline:
         specs = expected_specs(
-            args.confirmation_manifest, final_step=args.final_step
+            args.confirmation_manifest,
+            final_step=args.final_step,
+            expected_matrix=args.expected_matrix,
         )
         runs = None
         if specs is not None and training_results_complete(
@@ -263,6 +296,14 @@ def requested_steps(final_step: int, every: int) -> list[int]:
     if every < 1 or final_step < 1:
         raise ValueError("step interval and final step must be positive")
     return sorted(set(range(every, final_step + 1, every)) | {final_step})
+
+
+def parse_presets(value: str) -> set[str]:
+    presets = {item.strip() for item in value.split(",") if item.strip()}
+    invalid = presets - {"grok", "micro", "small", "medium", "large"}
+    if invalid or not presets:
+        raise ValueError(f"invalid preset selection: {sorted(invalid)}")
+    return presets
 
 
 def output_has_steps(prefix: Path, steps: list[int]) -> bool:
@@ -326,10 +367,11 @@ def run_job(
     steps: list[int],
     device: str,
     min_free_gb: float,
+    output_tag: str,
 ) -> dict[str, object]:
     # Render discovery is lexical; keep the validated final analysis last so
     # older pilot and trajectory files cannot override the same checkpoint.
-    prefix = run.path / f"{phase}_zz_final"
+    prefix = run.path / f"{phase}_{output_tag}"
     if output_has_steps(prefix, steps):
         return {"run": run.slug, "status": "skipped", "output": str(prefix)}
     available = free_gb(run.path)
@@ -384,6 +426,7 @@ def run_phase(
     workers: int,
     device: str,
     min_free_gb: float,
+    output_tag: str,
 ) -> list[dict[str, object]]:
     print(f"{now()} starting {phase}: {len(runs)} runs", flush=True)
     results: list[dict[str, object]] = []
@@ -398,6 +441,7 @@ def run_phase(
                 steps=steps,
                 device=device,
                 min_free_gb=min_free_gb,
+                output_tag=output_tag,
             )
             for run in runs
         ]
@@ -431,22 +475,29 @@ def main() -> None:
     script_root = Path(__file__).parent
 
     runs = wait_for_confirmation(args)
-    grok_runs = [run for run in runs if run.preset == "grok"]
+    operator_presets = parse_presets(args.operator_presets)
+    causal_presets = parse_presets(args.causal_presets)
+    operator_runs = [run for run in runs if run.preset in operator_presets]
     causal_runs = [
         run
-        for run in grok_runs
-        if run.condition in CAUSAL_CONDITIONS and run.seed in range(4)
+        for run in runs
+        if run.preset in causal_presets
+        and run.condition in CAUSAL_CONDITIONS
+        and run.seed in range(4)
     ]
     manifest = {
         "created_at": now(),
         "confirmation_manifest": str(args.confirmation_manifest),
+        "confirmation_results": str(args.confirmation_results),
+        "expected_matrix": args.expected_matrix,
         "final_step": args.final_step,
         "operator_steps": operator_steps,
         "causal_steps": causal_steps,
         "workers": args.workers,
         "device": args.device,
         "min_free_gb": args.min_free_gb,
-        "operator_runs": [run.slug for run in grok_runs],
+        "output_tag": args.output_tag,
+        "operator_runs": [run.slug for run in operator_runs],
         "causal_runs": [run.slug for run in causal_runs],
         "figure_root": str(args.figure_root),
     }
@@ -458,12 +509,13 @@ def main() -> None:
     run_phase(
         phase="operator_reuse",
         script=script_root / "operator_reuse.py",
-        runs=grok_runs,
+        runs=operator_runs,
         log_root=args.log_root,
         steps=operator_steps,
         workers=args.workers,
         device=args.device,
         min_free_gb=args.min_free_gb,
+        output_tag=args.output_tag,
     )
     run_phase(
         phase="causal_reuse",
@@ -474,6 +526,7 @@ def main() -> None:
         workers=args.workers,
         device=args.device,
         min_free_gb=args.min_free_gb,
+        output_tag=args.output_tag,
     )
 
     if free_gb(args.figure_root) < args.min_free_gb:
@@ -482,8 +535,6 @@ def main() -> None:
     render_command = [
         sys.executable,
         str(script_root / "render_reuse.py"),
-        "--results",
-        str(args.results_root),
         "--output",
         str(args.figure_root),
         "--operator-view",
@@ -491,6 +542,8 @@ def main() -> None:
         "--operator-layer",
         "last",
     ]
+    for run in runs:
+        render_command.extend(["--results", str(run.path)])
     with render_log.open("a") as log:
         log.write(f"\n{now()} START {' '.join(render_command)}\n")
         log.flush()
