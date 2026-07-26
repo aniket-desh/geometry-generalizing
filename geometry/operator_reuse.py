@@ -27,6 +27,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-prefix", type=Path)
     parser.add_argument("--checkpoint-glob", default="checkpoint-*.pt")
     parser.add_argument(
+        "--generator-relation",
+        type=int,
+        help=(
+            "Explicit operation-table column to treat as a pseudo-generator. "
+            "Required for random controls without a designated generator."
+        ),
+    )
+    parser.add_argument(
         "--steps",
         help="Optional comma-separated checkpoint steps to analyze.",
     )
@@ -64,6 +72,29 @@ def default_powers(order: int) -> list[int]:
         powers.append(value)
         value *= 2
     return powers
+
+
+def resolve_generator_relation(
+    *,
+    designated: int | None,
+    explicit: int | None,
+    relation_count: int,
+) -> tuple[int, str]:
+    if explicit is not None:
+        if not 0 <= explicit < relation_count:
+            raise ValueError(
+                f"--generator-relation must lie in [0, {relation_count - 1}]"
+            )
+        source = "explicit_control" if designated is None else "explicit_override"
+        return explicit, source
+    if designated is None:
+        raise ValueError(
+            "task has no designated cyclic generator; pass "
+            "--generator-relation to analyze it as an explicit control"
+        )
+    if not 0 <= designated < relation_count:
+        raise ValueError("task generator lies outside the operation table")
+    return designated, "task_designated"
 
 
 def orthogonal_fit(x: np.ndarray, y: np.ndarray) -> np.ndarray:
@@ -544,6 +575,20 @@ def write_outputs(
 
 
 def run_self_test() -> None:
+    relation, source = resolve_generator_relation(
+        designated=None, explicit=3, relation_count=7
+    )
+    if (relation, source) != (3, "explicit_control"):
+        raise AssertionError("explicit control generator resolution failed")
+    try:
+        resolve_generator_relation(
+            designated=None, explicit=7, relation_count=7
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("out-of-range generator relation was accepted")
+
     rng = np.random.default_rng(7)
     order, aliases, width = 17, 4, 12
     angle = 2.0 * np.pi * np.arange(order) / order
@@ -621,16 +666,19 @@ def main() -> None:
             )
         ),
     )
-    if task.generator is None:
-        raise ValueError(f"{task.name} has no designated cyclic generator")
     table_path = run_dir / "operation_table.npy"
     operation_table = (
         np.asarray(np.load(table_path), dtype=np.int64)
         if table_path.exists()
         else np.asarray(task.table, dtype=np.int64)
     )
+    generator_relation, generator_relation_source = resolve_generator_relation(
+        designated=task.generator,
+        explicit=args.generator_relation,
+        relation_count=operation_table.shape[1],
+    )
     successor = np.asarray(
-        operation_table[:, task.generator], dtype=np.int64
+        operation_table[:, generator_relation], dtype=np.int64
     )
     aliases = int(config["aliases"])
     contexts = int(config["contexts"])
@@ -747,6 +795,10 @@ def main() -> None:
         "run_name": config["run_name"],
         "task": task.name,
         "order": task.order,
+        "generator_relation": generator_relation,
+        "generator_relation_source": generator_relation_source,
+        "generator_relation_explicit": args.generator_relation is not None,
+        "task_designated_generator": task.generator,
         "aliases": aliases,
         "contexts_averaged": (
             contexts if args.context_samples <= 0 else min(args.context_samples, contexts)
