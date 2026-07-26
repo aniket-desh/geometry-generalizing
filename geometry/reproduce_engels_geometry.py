@@ -254,7 +254,7 @@ def render(payload: dict[str, np.ndarray], output: Path) -> None:
         ],
         [name[:3] for name in DAY_NAMES],
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.11),
+        bbox_to_anchor=(0.5, -0.19),
         ncol=7,
         frameon=False,
         fontsize=8,
