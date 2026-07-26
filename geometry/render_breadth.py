@@ -29,6 +29,27 @@ TASK_LABELS = {
     "cycle31": "cycle 31",
 }
 LINESTYLES = ("-", "-", "-", "-", "-", "-", "-", (0, (4, 2)), (0, (2, 2)))
+ACTION_METRIC_TASKS = frozenset(
+    {
+        "torus5",
+        "xor16",
+        "dihedral12",
+        "broken12",
+        "random31",
+        "cycle24",
+        "cycle31",
+    }
+)
+GENERATOR_METRIC_TASKS = frozenset(
+    {
+        "torus5",
+        "xor16",
+        "dihedral12",
+        "broken12",
+        "cycle24",
+        "cycle31",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -150,11 +171,11 @@ def discover_complete_runs(
         records = [
             record for record in records if int(record.get("step", -1)) <= expected_step
         ]
-        required = (
-            "test_accuracy",
-            "node_geometry.action_defect",
-            "node_geometry.generator_error",
-        )
+        required = ["test_accuracy"]
+        if task in ACTION_METRIC_TASKS:
+            required.append("node_geometry.action_defect")
+        if task in GENERATOR_METRIC_TASKS:
+            required.append("node_geometry.generator_error")
         if any(
             not any(nested_value(record, key) is not None for record in records)
             for key in required
@@ -211,9 +232,17 @@ def render_breadth(
     if {run.task for run in runs} != set(BREADTH_PILOT_TASKS):
         raise ValueError("rendering requires the exact nine-task breadth matrix")
     specs = (
-        ("test_accuracy", "held-out accuracy"),
-        ("node_geometry.action_defect", "action defect"),
-        ("node_geometry.generator_error", "generator error"),
+        ("test_accuracy", "held-out accuracy", frozenset(BREADTH_PILOT_TASKS)),
+        (
+            "node_geometry.action_defect",
+            "action defect",
+            ACTION_METRIC_TASKS,
+        ),
+        (
+            "node_geometry.generator_error",
+            "generator error",
+            GENERATOR_METRIC_TASKS,
+        ),
     )
     fig, axes = plt.subplots(1, 3, figsize=(10.2, 3.1), sharex=True)
     fig.patch.set_alpha(0)
@@ -232,7 +261,9 @@ def render_breadth(
                 label=TASK_LABELS[run.task],
             )
         )
-        for axis, (key, ylabel) in zip(axes, specs):
+        for axis, (key, ylabel, applicable_tasks) in zip(axes, specs):
+            if run.task not in applicable_tasks:
+                continue
             xs, ys = measured_curve(run, key)
             axis.plot(
                 xs,
@@ -255,6 +286,23 @@ def render_breadth(
             axis.set_xlim(0, expected_step)
             _step_axis(axis)
             _style_axis(axis)
+    for axis, (_, _, applicable_tasks) in zip(axes, specs):
+        not_applicable = [
+            TASK_LABELS[task]
+            for task in BREADTH_PILOT_TASKS
+            if task not in applicable_tasks
+        ]
+        if not_applicable:
+            axis.text(
+                0.02,
+                0.02,
+                "n/a: " + ", ".join(not_applicable),
+                transform=axis.transAxes,
+                color="#65737e",
+                fontsize=6.6,
+                ha="left",
+                va="bottom",
+            )
     axes[0].set_ylim(-0.03, 1.03)
     axes[0].yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
     fig.legend(
@@ -278,7 +326,22 @@ def render_breadth(
         "seed": 0,
         "aggregation": "none; one measured run per task",
         "checkpoint_rendering": "measured evaluation records only; no smoothing",
-        "panels": [key for key, _ in specs],
+        "panels": [
+            {
+                "metric": key,
+                "applicable_tasks": [
+                    task
+                    for task in BREADTH_PILOT_TASKS
+                    if task in applicable_tasks
+                ],
+                "not_applicable_tasks": [
+                    task
+                    for task in BREADTH_PILOT_TASKS
+                    if task not in applicable_tasks
+                ],
+            }
+            for key, _, applicable_tasks in specs
+        ],
         "artifacts": [
             *(str(path) for path in artifacts),
             str(manifest_path),
@@ -320,8 +383,16 @@ def write_fixture(root: Path, expected_step: int) -> None:
                     "step": step,
                     "test_accuracy": min(1.0, progress * (1 - 0.04 * index)),
                     "node_geometry": {
-                        "action_defect": 1.1 - 0.7 * progress + 0.03 * index,
-                        "generator_error": 1.2 - 0.8 * progress + 0.02 * index,
+                        "action_defect": (
+                            1.1 - 0.7 * progress + 0.03 * index
+                            if task in ACTION_METRIC_TASKS
+                            else None
+                        ),
+                        "generator_error": (
+                            1.2 - 0.8 * progress + 0.02 * index
+                            if task in GENERATOR_METRIC_TASKS
+                            else None
+                        ),
                     },
                 }
             )
