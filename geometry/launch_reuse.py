@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--profile",
-        choices=("pilot", "priority", "confirmation", "scale", "medium"),
+        choices=("pilot", "priority", "confirmation", "key60", "scale", "medium"),
         default="pilot",
     )
     parser.add_argument("--workers", type=int, default=4)
@@ -108,6 +108,18 @@ def matrix(profile: str) -> list[Run]:
             for seed in range(4)
             for preset in ("grok", "micro")
             for task, corruption, condition in CONDITIONS
+        ]
+    if profile == "key60":
+        key_conditions = tuple(
+            condition
+            for condition in CONDITIONS
+            if condition[2] in {"clean", "corrupt15", "random"}
+        )
+        return [
+            Run(task, corruption, condition, preset, seed, 60_000, 1_000)
+            for seed in range(3)
+            for preset in ("grok", "micro")
+            for task, corruption, condition in key_conditions
         ]
     if profile == "scale":
         scale_conditions = tuple(
@@ -353,9 +365,7 @@ def main() -> None:
                 f"in {result['elapsed_seconds']:.1f}s",
                 flush=True,
             )
-    (profile_log_root / "results.json").write_text(
-        json.dumps(results, indent=2) + "\n"
-    )
+    (profile_log_root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
     failures = [result for result in results if result["returncode"] != 0]
     if failures:
         raise SystemExit(f"{len(failures)} runs failed")

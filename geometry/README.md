@@ -40,6 +40,19 @@ reached 60,000 steps before writing the behavior and geometry trajectories to
 `/workspace/geometry-breadth-figures`. Since this pilot has one seed per task,
 the figure shows each measured run directly and does not draw a median.
 
+`launch_key60_tmux.sh` runs the isolated decisive matrix without changing the
+broader 64-run queue. It requires exactly 18 runs: three seeds, the `grok` and
+`micro` presets, and clean cyclic addition, 15% corrupted cyclic addition, and
+a random operation table. The operator analysis measures checkpoints 10k, 30k,
+and 60k. Causal transport is tested at the final output residual stream with
+three folds and five controls for all 18 runs at 60k; the minimal developmental
+comparison adds 10k and 30k for seed 0 of the `grok` preset in all three
+conditions. The final marker is withheld until behavior, generator geometry,
+usable shared-rule MDL, and causal outputs validate for the full matrix.
+`render_key60.py` then writes Nord spaghetti plots with faded seeds and bold
+pointwise medians, and `pack_key60.py` archives the exact selected run
+directories, logs, and figures.
+
 `reproduce_engels_geometry.py` reruns the GPT-2 small layer-7 SAE feature
 clusters reported by Engels et al. on the Pile, retaining only the weekday and
 twentieth-century-year manifolds and rendering them in the visual style used by
