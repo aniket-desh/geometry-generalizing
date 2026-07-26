@@ -35,6 +35,11 @@ Pythia layer and projects every checkpoint through a phase decoder fitted only
 at the final checkpoint. It is a developmental illustration, while the
 full-space metrics remain the evidence.
 
+`reproduce_engels_geometry.py` reruns the GPT-2 small layer-7 SAE feature
+clusters reported by Engels et al. on the Pile, retaining only the weekday and
+twentieth-century-year manifolds and rendering them in the visual style used by
+the post.
+
 `summarize.py` aggregates controlled runs, `posthoc_layers.py` reconstructs
 layerwise full-space metrics from saved snapshots, `derive_trajectory.py`
 computes the lightweight compression traces used in the main spaghetti plot,
