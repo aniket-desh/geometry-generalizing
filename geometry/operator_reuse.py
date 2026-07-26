@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import math
+import pickle
 from pathlib import Path
 from typing import Iterable
 
@@ -471,7 +472,7 @@ def _load_checkpoint(path: Path) -> dict[str, object]:
         return torch.load(
             path, map_location="cpu", weights_only=True, mmap=True
         )
-    except (TypeError, RuntimeError):
+    except (TypeError, RuntimeError, pickle.UnpicklingError):
         return torch.load(path, map_location="cpu", weights_only=False)
 
 
