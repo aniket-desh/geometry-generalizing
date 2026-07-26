@@ -322,10 +322,18 @@ def resumable_parts(
         return None
     validated: list[dict[str, object]] = []
     reconstructed = hashlib.sha256()
+    chunks_root = manifest_path.parent / f"{archive.name}.parts"
     for index, part in enumerate(parts):
         if not isinstance(part, dict) or part.get("index") != index:
             return None
-        path = Path(str(part.get("raw_chunk", "")))
+        expected_raw = chunks_root / f"{archive.name}.part-{index:04d}"
+        expected_wrapper = chunks_root / f"{expected_raw.name}.tar.gz"
+        if (
+            part.get("raw_chunk") != str(expected_raw)
+            or part.get("wrapper") != str(expected_wrapper)
+        ):
+            return None
+        path = expected_raw
         raw_bytes = part.get("raw_bytes")
         if not isinstance(raw_bytes, int) or isinstance(raw_bytes, bool):
             return None
@@ -452,11 +460,34 @@ def completion_valid(
 
 def validate_paths(settings: Settings) -> None:
     output = settings.output_root.resolve()
+    for label, value in (
+        ("stage", settings.stage),
+        ("archive prefix", settings.archive_prefix),
+    ):
+        component = Path(value)
+        if (
+            not value
+            or component.is_absolute()
+            or component.name != value
+            or value in (".", "..")
+        ):
+            raise ValueError(f"{label} must be a single path component")
+    stage_root = (output / settings.stage).resolve()
+    if stage_root.parent != output:
+        raise ValueError(
+            f"stage root {stage_root} must be directly inside {output}"
+        )
     for root in settings.roots:
         source = root.resolve()
-        if output == source or output.is_relative_to(source):
+        if (
+            output == source
+            or output.is_relative_to(source)
+            or stage_root == source
+            or stage_root.is_relative_to(source)
+        ):
             raise ValueError(
-                f"output root {output} must not be inside source root {source}"
+                f"stage root {stage_root} must not be inside "
+                f"source root {source}"
             )
 
 
@@ -493,7 +524,8 @@ def run(
     wait_for_markers(settings, log)
     inventory_path = stage_root / "inventory.json"
     archive = stage_root / f"{settings.archive_prefix}.tar.gz"
-    if archive.exists():
+    retained_archive = archive.exists()
+    if retained_archive:
         if not inventory_path.exists():
             raise RuntimeError(
                 f"archive exists without its inventory: {archive}"
@@ -526,17 +558,25 @@ def run(
         build_archive(archive, settings.roots)
     archive_sha = sha256(archive)
     archive_sha_path = archive.with_suffix(archive.suffix + ".sha256")
-    archive_sha_path.write_text(f"{archive_sha}  {archive.name}\n")
+    checksum_line = f"{archive_sha}  {archive.name}\n"
+    if retained_archive and archive_sha_path.exists():
+        try:
+            retained_checksum = archive_sha_path.read_text()
+        except (OSError, UnicodeError) as error:
+            raise RuntimeError(
+                f"could not validate retained archive checksum: {archive}"
+            ) from error
+        if retained_checksum != checksum_line:
+            raise RuntimeError(
+                f"retained archive checksum changed: {archive}"
+            )
+    else:
+        archive_sha_path.write_text(checksum_line)
     log(
         f"archive ready: {archive} "
         f"({archive.stat().st_size} bytes, sha256={archive_sha})"
     )
 
-    disk_guard(
-        settings,
-        additional_bytes=archive.stat().st_size + 2 * settings.chunk_bytes,
-        phase="chunk",
-    )
     manifest_path = stage_root / "parts.json"
     chunks = resumable_parts(
         manifest_path,
@@ -545,10 +585,22 @@ def run(
         chunk_bytes=settings.chunk_bytes,
     )
     if chunks is None:
+        disk_guard(
+            settings,
+            additional_bytes=archive.stat().st_size
+            + 2 * settings.chunk_bytes,
+            phase="chunk",
+        )
         chunks = split_archive(
             archive,
             stage_root / f"{archive.name}.parts",
             settings.chunk_bytes,
+        )
+    else:
+        disk_guard(
+            settings,
+            additional_bytes=0,
+            phase="resume",
         )
 
     def write_manifest() -> None:
@@ -580,6 +632,12 @@ def run(
             "no upload attempted"
         )
     else:
+        if any(not valid_url(part["url"]) for part in chunks):
+            disk_guard(
+                settings,
+                additional_bytes=2 * settings.chunk_bytes,
+                phase="upload wrapper",
+            )
         for part in chunks:
             if valid_url(part["url"]):
                 continue
@@ -784,6 +842,48 @@ def self_test() -> None:
         first_chunk.write_bytes(expected_chunk)
         assert completion_valid(completion)
 
+        archive_path = Path(str(payload["archive"]))
+        expected_archive = archive_path.read_bytes()
+        archive_path.write_bytes(
+            bytes([expected_archive[0] ^ 0xFF]) + expected_archive[1:]
+        )
+        try:
+            run(settings, uploader=forbidden_upload)
+        except RuntimeError as error:
+            assert "retained archive checksum changed" in str(error)
+        else:
+            raise AssertionError("corrupted retained archive was accepted")
+        archive_path.write_bytes(expected_archive)
+        assert completion_valid(completion)
+
+        completion.unlink()
+        manifest_path = Path(str(payload["parts_manifest"]))
+        manifest = load_json(manifest_path)
+        assert isinstance(manifest, dict)
+        manifest_parts = manifest["parts"]
+        assert isinstance(manifest_parts, list)
+        victim = root / "must-survive"
+        victim.write_text("sentinel")
+        manifest_parts[0]["wrapper"] = str(victim)
+        atomic_json(manifest_path, manifest)
+        completion = run(settings, uploader=forbidden_upload)
+        assert victim.read_text() == "sentinel"
+        assert completion_valid(completion)
+
+        completion.unlink()
+        free = shutil.disk_usage(settings.output_root).free
+        tight_resume_settings = Settings(
+            **{
+                **settings.__dict__,
+                "min_free_bytes": free - settings.chunk_bytes,
+            }
+        )
+        completion = run(
+            tight_resume_settings,
+            uploader=forbidden_upload,
+        )
+        assert completion_valid(completion)
+
         upload_settings = Settings(
             **{
                 **settings.__dict__,
@@ -832,6 +932,35 @@ def self_test() -> None:
 
         assert run(upload_settings, uploader=fail_upload) == completion
         assert (source / "small.json").exists()
+
+        for unsafe_settings in (
+            Settings(
+                **{
+                    **settings.__dict__,
+                    "stage": "../escape",
+                }
+            ),
+            Settings(
+                **{
+                    **settings.__dict__,
+                    "archive_prefix": "../escape",
+                }
+            ),
+            Settings(
+                **{
+                    **settings.__dict__,
+                    "roots": (
+                        settings.output_root / settings.stage,
+                    ),
+                }
+            ),
+        ):
+            try:
+                run(unsafe_settings, uploader=forbidden_upload)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("path traversal was accepted")
     print("self-test passed")
 
 
