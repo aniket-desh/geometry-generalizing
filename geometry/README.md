@@ -30,6 +30,11 @@ There are three complementary protocols:
    natural cyclic domains such as weekdays, months, seasons, compass directions,
    clock hours, and digits.
 
+`pythia_weekday_movie.py` extracts the four weekday prompt contexts at a fixed
+Pythia layer and projects every checkpoint through a phase decoder fitted only
+at the final checkpoint. It is a developmental illustration, while the
+full-space metrics remain the evidence.
+
 `summarize.py` aggregates controlled runs, `posthoc_layers.py` reconstructs
 layerwise full-space metrics from saved snapshots, `derive_trajectory.py`
 computes the lightweight compression traces used in the main spaghetti plot,
