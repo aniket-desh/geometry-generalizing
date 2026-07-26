@@ -111,6 +111,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--step-every", type=int, default=10_000)
     parser.add_argument(
+        "--operator-start-step",
+        type=int,
+        help=(
+            "Analyze operator checkpoints at or after this step. This lets a "
+            "later stage reuse an earlier stage's frozen trajectory."
+        ),
+    )
+    parser.add_argument(
         "--causal-step-every",
         type=int,
         default=0,
@@ -475,6 +483,12 @@ def main() -> None:
     args.log_root.mkdir(parents=True, exist_ok=True)
     args.figure_root.mkdir(parents=True, exist_ok=True)
     operator_steps = requested_steps(args.final_step, args.step_every)
+    if args.operator_start_step is not None:
+        if not 0 < args.operator_start_step <= args.final_step:
+            raise ValueError("--operator-start-step must lie within training")
+        operator_steps = [
+            step for step in operator_steps if step >= args.operator_start_step
+        ]
     causal_steps = (
         [args.final_step]
         if args.causal_step_every == 0
