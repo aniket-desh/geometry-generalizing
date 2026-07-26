@@ -371,6 +371,9 @@ def run() -> None:
         "task_order": task.order,
         "task_seed": task_seed,
         "task_corruption_fraction": task.corruption_fraction,
+        "task_actual_corruption_fraction": (
+            task.actual_corruption_fraction
+        ),
         "task_table_sha256": hashlib.sha256(task.table.tobytes()).hexdigest(),
         "token_seed": token_seed,
         "model": config.__dict__,

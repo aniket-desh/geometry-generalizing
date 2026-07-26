@@ -13,6 +13,7 @@ class TaskSpec:
     generator: int | None
     description: str
     corruption_fraction: float = 0.0
+    actual_corruption_fraction: float = 0.0
 
     @property
     def order(self) -> int:
@@ -135,6 +136,8 @@ def _broken_cycle(order: int, seed: int, corruption: float = 0.15) -> np.ndarray
 def make_task(
     name: str, seed: int = 0, *, corruption: float = 0.0
 ) -> TaskSpec:
+    nominal_corruption = float(corruption)
+    corruption_reference: np.ndarray | None = None
     builders = {
         "cycle7": (
             "cycle",
@@ -232,9 +235,13 @@ def make_task(
     except KeyError as exc:
         choices = ", ".join(sorted(builders))
         raise ValueError(f"unknown task {name!r}; choose one of {choices}") from exc
+    if name == "broken12":
+        nominal_corruption = 0.15
+        corruption_reference = _cycle(12)
     if corruption:
         if family != "cycle":
             raise ValueError("corruption is supported only for cycle tasks")
+        corruption_reference = np.asarray(table, dtype=np.int64).copy()
         table = _frequency_preserving_corruption(
             table, seed=seed, corruption=corruption
         )
@@ -247,13 +254,19 @@ def make_task(
         )
     else:
         task_name = name
+    actual_corruption = (
+        float(np.mean(np.asarray(table) != corruption_reference))
+        if corruption_reference is not None
+        else 0.0
+    )
     spec = TaskSpec(
         name=task_name,
         family=family,
         table=np.asarray(table, dtype=np.int64),
         generator=generator,
         description=description,
-        corruption_fraction=float(corruption),
+        corruption_fraction=nominal_corruption,
+        actual_corruption_fraction=actual_corruption,
     )
     spec.validate()
     return spec

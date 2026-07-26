@@ -288,6 +288,15 @@ def main() -> None:
         "min_free_gb": args.min_free_gb,
         "runs": [asdict(run) for run in runs],
     }
+    if args.profile == "breadth-diagnostics":
+        manifest["comparison_notes"] = {
+            "broken12_legacy_metadata": (
+                "Existing breadth-run configs report "
+                "task_corruption_fraction=0.0 for broken12. The saved table "
+                "contains 24 exceptions among 144 cells: nominal 0.15, actual "
+                "1/6. Compare operation tables, not the legacy field."
+            )
+        }
     (log_root / f"{args.profile}-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n"
     )
