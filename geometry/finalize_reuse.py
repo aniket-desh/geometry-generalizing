@@ -318,7 +318,9 @@ def run_job(
     device: str,
     min_free_gb: float,
 ) -> dict[str, object]:
-    prefix = run.path / f"{phase}_final"
+    # Render discovery is lexical; keep the validated final analysis last so
+    # older pilot and trajectory files cannot override the same checkpoint.
+    prefix = run.path / f"{phase}_zz_final"
     if output_has_steps(prefix, steps):
         return {"run": run.slug, "status": "skipped", "output": str(prefix)}
     available = free_gb(run.path)
