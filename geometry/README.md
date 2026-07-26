@@ -41,6 +41,24 @@ geometry companion to `/workspace/geometry-breadth-figures`. Since this pilot
 has one seed per task, both figures show measured checkpoints directly and do
 not draw a median.
 
+`render_breadth_replication.py` is the separate finalizer for the restricted
+four-task confirmation. It reads the preserved seed-0 `.tar.gz` directly,
+combines it with seeds 1 and 2 from the replication result root, and rejects
+anything other than the exact 4-task × 3-seed matrix. It also verifies the
+semantic protocol hash, every explicit seed field, and each operation table
+against its seeded task generator. The figure shows faint measured runs and a
+bold pointwise median only where all three seeds have an observed checkpoint:
+
+```bash
+python geometry/render_breadth_replication.py \
+  --seed0-archive /path/to/vi-breadth60.tar.gz \
+  --replication-root /path/to/breadth-replication-results \
+  --output /path/to/breadth-replication-figures \
+  --wait
+
+python geometry/render_breadth_replication.py --self-test
+```
+
 `launch_priority_tmux.sh` is the four-GPU launcher for the decisive mixed-horizon
 matrix. It assigns one disjoint training shard to each physical GPU in
 `0,1,2,3`, and every tmux session receives its own `CUDA_VISIBLE_DEVICES`
