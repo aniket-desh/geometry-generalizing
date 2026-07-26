@@ -258,6 +258,56 @@ tmux new-session -d -s vi-capacity-finalize \
 python geometry/finalize_capacity.py --self-test
 ```
 
+`render_model_spectrum.py` makes the compact endpoint comparison used in the
+post. It accepts only an exact core18, scale18, and large9 suite, then plots the
+15%-corrupted 30k endpoints across all five presets. Faint lines connect the
+same seed across models and the bold line is the pointwise median. The three
+panels separate held-out behavior, alias-held-out shared-code gain, and node-0
+canonical-cycle transport. The validator checks every model width and depth,
+the preregistered successor, matching operation-table and held-out-mask hashes,
+the exact suite roots, and the bounded causal metric policy before it writes a
+figure. The presets change width and depth together, and use batch sizes 4096,
+4096, 4096, 2048, and 1024, so this is a descriptive preset comparison rather
+than an isolated capacity scaling law. Causal folds use qualified accuracy when
+at least 64 examples qualify and bounded absolute accuracy otherwise; the output
+records each fold's metric key because those populations are not homogeneous.
+
+```bash
+python geometry/render_model_spectrum.py \
+  --core-root /path/to/exact-core18-results \
+  --scale-root /path/to/exact-scale18-results \
+  --large-root /path/to/exact-large9-results \
+  --output /path/to/model-spectrum
+
+# Audit suites already present without producing a partial figure.
+python geometry/render_model_spectrum.py \
+  --core-root /path/to/exact-core18-results \
+  --scale-root /path/to/exact-scale18-results \
+  --validate-only
+
+python geometry/render_model_spectrum.py --self-test
+```
+
+`render_measured_geometry_gif.py` renders only measured activation-centroid
+checkpoints. It fits one unsupervised PCA basis at the final saved checkpoint,
+applies that basis unchanged to every frame, uses one fixed scale, and never
+interpolates point positions or aligns frames with Procrustes. With
+`--view node --layer 0`, the points are learned input-state token embeddings
+before the first transformer block, not context-dependent hidden states. The
+manifest reports how much centered between-state centroid energy lies in the
+displayed plane, explicitly excluding within-state activation variance, and
+identifies the best cyclic Fourier harmonic in that plane.
+
+```bash
+python geometry/render_measured_geometry_gif.py \
+  --run /path/to/clean-cycle-run \
+  --output /path/to/measured-geometry.gif \
+  --view node \
+  --layer 0
+
+python geometry/render_measured_geometry_gif.py --self-test
+```
+
 Automatic summary suite detection deliberately rejects the 27-link union
 because it contains multiple complete sub-suites; the finalizer selects
 `--suite capacity` explicitly.
