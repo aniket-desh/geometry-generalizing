@@ -240,28 +240,17 @@ def render(payload: dict[str, np.ndarray], output: Path) -> None:
             rasterized=True,
         )
     axes[0].set_title("weekdays", color=NORD_INK, fontsize=12)
-    axes[0].legend(
-        [
-            Line2D(
-                [0],
-                [0],
-                marker="o",
-                linestyle="",
-                color=color,
-                markersize=5,
-            )
-            for color in NORD
-        ],
-        [name[:3] for name in DAY_NAMES],
-        loc="lower center",
-        bbox_to_anchor=(0.5, -0.19),
-        ncol=7,
-        frameon=False,
-        fontsize=8,
-        handletextpad=0.2,
-        columnspacing=0.7,
-        labelcolor=NORD_INK,
-    )
+    day_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            color=color,
+            markersize=5,
+        )
+        for color in NORD
+    ]
 
     axes[1].scatter(
         year_projection[years < 0, 2],
@@ -304,6 +293,25 @@ def render(payload: dict[str, np.ndarray], output: Path) -> None:
         pad=2,
     )
     colorbar.outline.set_visible(False)
+    fig.canvas.draw()
+    weekday_box = axes[0].get_position()
+    colorbar_box = colorbar.ax.get_position()
+    fig.legend(
+        day_handles,
+        [name[:3] for name in DAY_NAMES],
+        loc="center",
+        bbox_to_anchor=(
+            weekday_box.x0 + weekday_box.width / 2,
+            colorbar_box.y0 + colorbar_box.height / 2,
+        ),
+        bbox_transform=fig.transFigure,
+        ncol=7,
+        frameon=False,
+        fontsize=8,
+        handletextpad=0.2,
+        columnspacing=0.7,
+        labelcolor=NORD_INK,
+    )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=240, transparent=True, bbox_inches="tight")
