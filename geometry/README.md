@@ -36,9 +36,10 @@ at the final checkpoint. It is a developmental illustration, while the
 full-space metrics remain the evidence.
 
 `render_breadth.py --wait` validates that the nine seed-0 breadth runs have all
-reached 60,000 steps before writing the behavior and geometry trajectories to
-`/workspace/geometry-breadth-figures`. Since this pilot has one seed per task,
-the figure shows each measured run directly and does not draw a median.
+reached 60,000 steps before writing a behavior small-multiple and a separate
+geometry companion to `/workspace/geometry-breadth-figures`. Since this pilot
+has one seed per task, both figures show measured checkpoints directly and do
+not draw a median.
 
 `launch_key60_tmux.sh` runs the isolated decisive matrix without changing the
 broader 64-run queue. It requires exactly 18 runs: three seeds, the `grok` and

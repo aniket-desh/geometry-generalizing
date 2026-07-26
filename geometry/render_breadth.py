@@ -14,7 +14,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import PercentFormatter
 
 from launch_sweep import BREADTH_PILOT_TASKS
-from render_reuse import SERIES, _save_static, _step_axis, _style_axis, plt
+from render_reuse import NORD, SERIES, _save_static, _step_axis, _style_axis, plt
 
 
 TASK_LABELS = {
@@ -28,7 +28,22 @@ TASK_LABELS = {
     "cycle24": "cycle 24",
     "cycle31": "cycle 31",
 }
+BEHAVIOR_GRID_ORDER = (
+    "torus5",
+    "xor16",
+    "dihedral12",
+    "cycle24",
+    "cycle31",
+    "random31",
+    "broken12",
+    "path16",
+    "tree15",
+)
 LINESTYLES = ("-", "-", "-", "-", "-", "-", "-", (0, (4, 2)), (0, (2, 2)))
+TASK_STYLES = {
+    task: (SERIES[index % len(SERIES)], LINESTYLES[index])
+    for index, task in enumerate(BREADTH_PILOT_TASKS)
+}
 ACTION_METRIC_TASKS = frozenset(
     {
         "torus5",
@@ -223,6 +238,158 @@ def measured_curve(
     )
 
 
+def plot_measured_curve(
+    axis: plt.Axes,
+    run: BreadthRun,
+    key: str,
+    *,
+    color: str,
+    linestyle: str | tuple[int, tuple[int, ...]] = "-",
+    linewidth: float = 1.15,
+) -> None:
+    xs, ys = measured_curve(run, key)
+    axis.plot(
+        xs,
+        ys,
+        color=color,
+        linestyle=linestyle,
+        linewidth=linewidth,
+        alpha=0.84,
+        solid_capstyle="round",
+    )
+    axis.scatter(
+        xs,
+        ys,
+        color=color,
+        s=3.0,
+        alpha=0.28,
+        linewidths=0,
+    )
+
+
+def render_behavior(
+    runs: list[BreadthRun],
+    *,
+    output: Path,
+    expected_step: int,
+) -> list[Path]:
+    by_task = {run.task: run for run in runs}
+    ordered = [by_task[task] for task in BEHAVIOR_GRID_ORDER]
+    fig, axes = plt.subplots(3, 3, figsize=(8.1, 4.6), sharex=True, sharey=True)
+    fig.patch.set_alpha(0)
+    fig.subplots_adjust(
+        left=0.075,
+        right=0.995,
+        top=0.98,
+        bottom=0.12,
+        hspace=0.30,
+        wspace=0.14,
+    )
+    for index, (axis, run) in enumerate(zip(axes.flat, ordered)):
+        color, linestyle = TASK_STYLES[run.task]
+        plot_measured_curve(
+            axis,
+            run,
+            "test_accuracy",
+            color=color,
+            linestyle=linestyle,
+        )
+        row, column = divmod(index, 3)
+        axis.set_title(
+            TASK_LABELS[run.task],
+            loc="left",
+            color=NORD["ink"],
+            fontsize=8.3,
+            pad=2,
+        )
+        axis.set_xlim(0, expected_step)
+        axis.set_ylim(-0.03, 1.03)
+        axis.set_yticks((0.0, 0.5, 1.0))
+        axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+        _step_axis(axis)
+        _style_axis(axis)
+        if column:
+            axis.tick_params(left=False, labelleft=False)
+            axis.spines["left"].set_visible(False)
+        if row < 2:
+            axis.tick_params(bottom=False, labelbottom=False)
+            axis.spines["bottom"].set_visible(False)
+    fig.text(0.535, 0.025, "step", ha="center", va="bottom")
+    fig.text(
+        0.015,
+        0.55,
+        "held-out accuracy",
+        ha="left",
+        va="center",
+        rotation=90,
+    )
+    return _save_static(fig, output / "breadth-trajectories")
+
+
+def render_geometry(
+    runs: list[BreadthRun],
+    *,
+    output: Path,
+    expected_step: int,
+) -> list[Path]:
+    specs = (
+        (
+            "node_geometry.action_defect",
+            "action defect",
+            ACTION_METRIC_TASKS,
+        ),
+        (
+            "node_geometry.generator_error",
+            "generator error",
+            GENERATOR_METRIC_TASKS,
+        ),
+    )
+    fig, axes = plt.subplots(1, 2, figsize=(8.1, 2.65), sharex=True)
+    fig.patch.set_alpha(0)
+    fig.subplots_adjust(left=0.085, right=0.995, top=0.97, bottom=0.31, wspace=0.29)
+    handles: list[Line2D] = []
+    for run in runs:
+        if run.task not in ACTION_METRIC_TASKS | GENERATOR_METRIC_TASKS:
+            continue
+        color, linestyle = TASK_STYLES[run.task]
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.6,
+                label=TASK_LABELS[run.task],
+            )
+        )
+        for axis, (key, ylabel, applicable_tasks) in zip(axes, specs):
+            if run.task not in applicable_tasks:
+                continue
+            plot_measured_curve(
+                axis,
+                run,
+                key,
+                color=color,
+                linestyle=linestyle,
+            )
+    for axis, (_, ylabel, _) in zip(axes, specs):
+        axis.set_xlabel("step")
+        axis.set_ylabel(ylabel)
+        axis.set_xlim(0, expected_step)
+        _step_axis(axis)
+        _style_axis(axis)
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=4,
+        frameon=False,
+        fontsize=7.8,
+        handlelength=2.1,
+        columnspacing=1.25,
+    )
+    return _save_static(fig, output / "breadth-geometry-trajectories")
+
+
 def render_breadth(
     runs: list[BreadthRun],
     *,
@@ -244,78 +411,18 @@ def render_breadth(
             GENERATOR_METRIC_TASKS,
         ),
     )
-    fig, axes = plt.subplots(1, 3, figsize=(10.2, 3.1), sharex=True)
-    fig.patch.set_alpha(0)
-    fig.subplots_adjust(left=0.07, right=0.995, top=0.98, bottom=0.30, wspace=0.36)
-    handles: list[Line2D] = []
-    for index, run in enumerate(runs):
-        color = SERIES[index % len(SERIES)]
-        linestyle = LINESTYLES[index]
-        handles.append(
-            Line2D(
-                [0],
-                [0],
-                color=color,
-                linestyle=linestyle,
-                linewidth=1.7,
-                label=TASK_LABELS[run.task],
-            )
-        )
-        for axis, (key, ylabel, applicable_tasks) in zip(axes, specs):
-            if run.task not in applicable_tasks:
-                continue
-            xs, ys = measured_curve(run, key)
-            axis.plot(
-                xs,
-                ys,
-                color=color,
-                linestyle=linestyle,
-                linewidth=1.35,
-                alpha=0.92,
-            )
-            axis.scatter(
-                xs,
-                ys,
-                color=color,
-                s=3.0,
-                alpha=0.34,
-                linewidths=0,
-            )
-            axis.set_xlabel("step")
-            axis.set_ylabel(ylabel)
-            axis.set_xlim(0, expected_step)
-            _step_axis(axis)
-            _style_axis(axis)
-    for axis, (_, _, applicable_tasks) in zip(axes, specs):
-        not_applicable = [
-            TASK_LABELS[task]
-            for task in BREADTH_PILOT_TASKS
-            if task not in applicable_tasks
-        ]
-        if not_applicable:
-            axis.text(
-                0.02,
-                0.02,
-                "n/a: " + ", ".join(not_applicable),
-                transform=axis.transAxes,
-                color="#65737e",
-                fontsize=6.6,
-                ha="left",
-                va="bottom",
-            )
-    axes[0].set_ylim(-0.03, 1.03)
-    axes[0].yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
-    fig.legend(
-        handles=handles,
-        loc="lower center",
-        ncol=5,
-        frameon=False,
-        fontsize=8,
-        handlelength=2.2,
-        columnspacing=1.25,
-    )
     output.mkdir(parents=True, exist_ok=True)
-    artifacts = _save_static(fig, output / "breadth-trajectories")
+    behavior_artifacts = render_behavior(
+        runs,
+        output=output,
+        expected_step=expected_step,
+    )
+    geometry_artifacts = render_geometry(
+        runs,
+        output=output,
+        expected_step=expected_step,
+    )
+    artifacts = [*behavior_artifacts, *geometry_artifacts]
     manifest_path = output / "breadth-render-manifest.json"
     done_path = output / "breadth-render-done.json"
     manifest = {
@@ -326,6 +433,16 @@ def render_breadth(
         "seed": 0,
         "aggregation": "none; one measured run per task",
         "checkpoint_rendering": "measured evaluation records only; no smoothing",
+        "figures": {
+            "breadth-trajectories": {
+                "focus": "held-out behavior",
+                "layout": "one task per panel",
+            },
+            "breadth-geometry-trajectories": {
+                "focus": "full-space geometry",
+                "undefined_series": "omitted",
+            },
+        },
         "panels": [
             {
                 "metric": key,
@@ -420,6 +537,8 @@ def run_self_test(destination: Path | None) -> None:
     expected = {
         "breadth-trajectories.png",
         "breadth-trajectories.pdf",
+        "breadth-geometry-trajectories.png",
+        "breadth-geometry-trajectories.pdf",
         "breadth-render-manifest.json",
         "breadth-render-done.json",
     }
