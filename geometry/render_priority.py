@@ -32,9 +32,7 @@ from render_key60 import (
     CONTROL_ORDER,
     NORD,
     _finite,
-    _median_curve,
     _records,
-    _save,
     _step_axis,
     _style_axis,
 )
@@ -48,7 +46,31 @@ CONDITION_STYLE = {
 PRIORITY_CONTROL_LABEL = {
     **CONTROL_LABEL,
     "learned_generator": "canonical cycle",
+    "exact_state_swap": "exact state",
+    "target_centroid": "target centroid",
+    "scrambled_successor": "scrambled",
+    "random_orthogonal": "random orthogonal",
 }
+SUITE_PRESETS = {
+    frozenset(("grok", "micro")): "core",
+    frozenset(("small", "medium")): "scale",
+}
+PRESET_LABEL = {
+    "grok": "grok · 128×1",
+    "micro": "micro · 128×2",
+    "small": "small · 256×4",
+    "medium": "medium · 512×6",
+}
+PRESET_DEPTH = {
+    "grok": 1,
+    "micro": 2,
+    "small": 4,
+    "medium": 6,
+}
+CAUSAL_SITES = (
+    ("node", "node 0"),
+    ("output", "output final"),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,6 +83,151 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-output", type=Path)
     return parser.parse_args()
+
+
+def _suite_for(presets: tuple[str, ...]) -> str:
+    suite = SUITE_PRESETS.get(frozenset(presets))
+    if suite is None:
+        raise ValueError(
+            "priority figures require the core pair (grok, micro) or "
+            "the scale pair (small, medium)"
+        )
+    return suite
+
+
+def _pointwise_median(
+    curves: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(curves) != len(SEEDS):
+        raise ValueError(
+            f"expected {len(SEEDS)} seed trajectories, received {len(curves)}"
+        )
+    reference = curves[0][0]
+    if any(
+        xs.shape != reference.shape or not np.array_equal(xs, reference)
+        for xs, _ in curves[1:]
+    ):
+        raise ValueError("seed trajectories do not share the same measured steps")
+    values = np.stack([ys for _, ys in curves])
+    if values.shape[1] != reference.shape[0] or not np.isfinite(values).all():
+        raise ValueError("seed trajectories contain incomplete values")
+    return reference.copy(), np.median(values, axis=0)
+
+
+def _save_figure(
+    fig: plt.Figure,
+    base: Path,
+    *,
+    title: str,
+    caption: str,
+) -> list[Path]:
+    base.parent.mkdir(parents=True, exist_ok=True)
+    png = base.with_suffix(".png")
+    pdf = base.with_suffix(".pdf")
+    fig.savefig(
+        png,
+        dpi=240,
+        transparent=True,
+        bbox_inches="tight",
+        pad_inches=0.04,
+        metadata={
+            "Title": title,
+            "Description": caption,
+            "Software": "geometry/render_priority.py",
+        },
+    )
+    fig.savefig(
+        pdf,
+        transparent=True,
+        bbox_inches="tight",
+        pad_inches=0.04,
+        metadata={
+            "Title": title,
+            "Subject": caption,
+            "Keywords": (
+                "activation geometry; pointwise median; mixed horizon; "
+                "preregistered latent cycle"
+            ),
+            "Creator": "geometry/render_priority.py",
+        },
+    )
+    plt.close(fig)
+    return [png, pdf]
+
+
+def _caption_payload(
+    suite: str,
+    presets: tuple[str, ...],
+) -> dict[str, object]:
+    trajectory_name = f"{suite}-trajectories"
+    sites_name = f"{suite}-causal-sites"
+    controls_name = f"{suite}-output-final-controls"
+    common = (
+        "The cross-condition probe is the preregistered latent-label cycle "
+        "k → (k + 1) mod n; its orientation was fixed before activations were "
+        "inspected, and arbitrary surface token IDs never choose it."
+    )
+    seed_policy = (
+        "Faint lines show the three measured seeds and the bold line is their "
+        "pointwise median; there is no confidence interval."
+    )
+    trajectory_policy = (
+        f"{seed_policy} Straight segments only join measured evaluations or "
+        "checkpoints, with no smoothing."
+    )
+    paired_policy = (
+        f"{seed_policy} Straight segments connect paired measurements within "
+        "each seed, with no smoothing."
+    )
+    return {
+        "suite": suite,
+        "presets": list(presets),
+        "probe": {
+            "status": "preregistered",
+            "successor_mode": "latent_label_plus_one",
+            "definition": "latent label k maps to (k + 1) mod n",
+            "orientation": "fixed before activation inspection",
+        },
+        "mixed_horizons": {
+            "clean": 60_000,
+            "corrupt15": 30_000,
+            "random": 30_000,
+            "extrapolation": False,
+        },
+        "figures": {
+            trajectory_name: {
+                "title": f"{suite.capitalize()} behavior, geometry, and compression trajectories",
+                "caption": (
+                    f"{trajectory_policy} Clean runs end at 60k steps; 15%-corrupted "
+                    "and random-table controls end at 30k, with no values "
+                    "extended beyond those endpoints. Canonical-cycle error "
+                    "and alias-held-out reuse gain are evaluated on the output "
+                    "residual stream after the final block. The reuse code "
+                    "holds out aliases, not a nested state-and-alias split, so "
+                    f"it is the weaker compression diagnostic. {common}"
+                ),
+            },
+            sites_name: {
+                "title": f"{suite.capitalize()} canonical-cycle intervention sites",
+                "caption": (
+                    "Canonical-cycle intervention success at the input-state "
+                    "activation before the first transformer block (node 0) "
+                    "and at the output residual stream after the final block "
+                    f"(output final). {paired_policy} {common}"
+                ),
+            },
+            controls_name: {
+                "title": f"{suite.capitalize()} output-final intervention controls",
+                "caption": (
+                    "Canonical-cycle and matched control interventions at the "
+                    "output residual stream after the final transformer block "
+                    "(output final). Exact-state and target-centroid controls "
+                    "are label-informed references; scrambled-successor and "
+                    f"random-orthogonal controls test specificity. {paired_policy} {common}"
+                ),
+            },
+        },
+    }
 
 
 def _load_runs(paths: Iterable[Path], presets: tuple[str, ...]) -> list[KeyRun]:
@@ -159,27 +326,56 @@ def _operator_curve(run: KeyRun, key: str) -> tuple[np.ndarray, np.ndarray]:
     )
 
 
-def _causal_value(run: KeyRun, control: str = "learned_generator") -> float:
+def _causal_layer(run: KeyRun, position: str) -> int:
+    if position == "node":
+        return 0
+    if position != "output":
+        raise ValueError(f"unsupported causal position: {position}")
+    config = load_json(run.path / "config.json")
+    model = config.get("model") if isinstance(config, dict) else None
+    if not isinstance(model, dict):
+        raise ValueError(f"missing model depth for {run.slug}")
+    try:
+        layer = int(model["depth"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"invalid model depth for {run.slug}") from error
+    if layer < 1:
+        raise ValueError(f"invalid output-final layer for {run.slug}")
+    return layer
+
+
+def _causal_value(
+    run: KeyRun,
+    control: str = "learned_generator",
+    *,
+    position: str = "output",
+) -> float:
     step = horizon_for(run)
     records = _records(causal_prefix(CausalJob(run, step)).with_suffix(".json"))
+    layer = _causal_layer(run, position)
     candidates = [
         record
         for record in records
         if str(record.get("control")) == control
-        and str(record.get("position")) == "output"
+        and str(record.get("position")) == position
+        and int(record.get("layer", -1)) == layer
         and int(record.get("step", -1)) == step
     ]
     if not candidates:
-        raise ValueError(f"missing causal {control} at {step} for {run.slug}")
-    layer = max(int(record.get("layer", -1)) for record in candidates)
+        raise ValueError(
+            f"missing causal {control} at {position} layer {layer}, "
+            f"step {step} for {run.slug}"
+        )
     values = []
     for record in candidates:
-        if int(record.get("layer", -1)) != layer:
-            continue
         value = next(
             (
                 candidate
-                for key in ("qualified_desired_accuracy", "probability_recovery", "desired_accuracy")
+                for key in (
+                    "qualified_desired_accuracy",
+                    "probability_recovery",
+                    "desired_accuracy",
+                )
                 if (candidate := _finite(record.get(key))) is not None
             ),
             None,
@@ -191,33 +387,43 @@ def _causal_value(run: KeyRun, control: str = "learned_generator") -> float:
     return float(np.median(values))
 
 
-def _causal_curve(run: KeyRun) -> tuple[np.ndarray, np.ndarray]:
-    return np.asarray([horizon_for(run)], dtype=float), np.asarray([_causal_value(run)])
+def _causal_site_curve(run: KeyRun) -> tuple[np.ndarray, np.ndarray]:
+    return (
+        np.arange(len(CAUSAL_SITES), dtype=float),
+        np.asarray(
+            [
+                _causal_value(run, position=position)
+                for position, _ in CAUSAL_SITES
+            ],
+            dtype=float,
+        ),
+    )
 
 
-def render_spaghetti(
+def render_trajectories(
     runs: list[KeyRun],
     output: Path,
     presets: tuple[str, ...],
+    suite: str,
+    captions: dict[str, object],
 ) -> list[Path]:
     specs: tuple[tuple[str, str, Callable[[KeyRun], tuple[np.ndarray, np.ndarray]]], ...] = (
         ("held-out accuracy", "accuracy", _behavior_curve),
         (
             "canonical-cycle error",
-            "error",
+            "relative error",
             lambda run: _operator_curve(run, "joint_cv_error"),
         ),
         (
-            "usable shared-rule gain",
-            "kbit",
+            "alias-held-out reuse gain",
+            "gain (kbit)",
             lambda run: _operator_curve(run, "usable_reuse_gain_bits"),
         ),
-        ("canonical-cycle causal probe", "success", _causal_curve),
     )
     fig, axes = plt.subplots(
         len(presets),
         len(specs),
-        figsize=(12.7, 5.25),
+        figsize=(10.1, 5.25),
         constrained_layout=True,
         squeeze=False,
         sharex="col",
@@ -238,18 +444,20 @@ def render_spaghetti(
                     curves.append((xs, ys))
                     axis.plot(xs, ys, color=color, alpha=0.18, linewidth=0.9)
                     axis.scatter(xs, ys, color=color, alpha=0.18, s=7, linewidths=0)
-                median_x, median_y = _median_curve(curves)
+                median_x, median_y = _pointwise_median(curves)
                 axis.plot(median_x, median_y, color=color, linewidth=2.4, label=label)
                 axis.scatter(median_x, median_y, color=color, s=16, linewidths=0, zorder=3)
             if row == 0:
                 axis.set_title(title, fontweight="normal")
-            axis.set_ylabel(f"{preset}\n{ylabel}" if column == 0 else ylabel)
+            axis.set_ylabel(
+                f"{PRESET_LABEL[preset]}\n{ylabel}" if column == 0 else ylabel
+            )
             if row == len(presets) - 1:
                 axis.set_xlabel("step")
             axis.set_xlim(-1_500, 61_500)
             _step_axis(axis)
             _style_axis(axis)
-            if column in {0, 3}:
+            if column == 0:
                 axis.set_ylim(-0.03, 1.03)
                 axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
             if column == 2:
@@ -282,13 +490,21 @@ def render_spaghetti(
         )
     )
     fig.legend(handles=handles, loc="outside lower center", ncol=5, frameon=False)
-    return _save(fig, output / "priority-spaghetti")
+    figure = captions["figures"][f"{suite}-trajectories"]
+    return _save_figure(
+        fig,
+        output / f"{suite}-trajectories",
+        title=str(figure["title"]),
+        caption=str(figure["caption"]),
+    )
 
 
-def render_causal_controls(
+def render_causal_sites(
     runs: list[KeyRun],
     output: Path,
     presets: tuple[str, ...],
+    suite: str,
+    captions: dict[str, object],
 ) -> list[Path]:
     fig, axes = plt.subplots(
         len(presets),
@@ -300,32 +516,45 @@ def render_causal_controls(
         sharey=True,
     )
     fig.patch.set_alpha(0)
-    x = np.arange(len(CONTROL_ORDER))
-    colors = [NORD["green"], NORD["frost_dark"], NORD["cyan"], NORD["orange"], NORD["purple"]]
+    x = np.arange(len(CAUSAL_SITES))
     for row, preset in enumerate(presets):
         for column, (_, _, condition) in enumerate(KEY_CONDITIONS):
             axis = axes[row, column]
-            seed_curves = []
+            _, color = CONDITION_STYLE[condition]
+            seed_curves: list[tuple[np.ndarray, np.ndarray]] = []
             for run in [
                 item
                 for item in runs
                 if item.preset == preset and item.condition == condition
             ]:
-                values = np.asarray([_causal_value(run, control) for control in CONTROL_ORDER])
-                seed_curves.append(values)
-                axis.plot(x, values, color=NORD["muted"], alpha=0.18, linewidth=0.85)
-                axis.scatter(x, values, color=colors, alpha=0.22, s=12, linewidths=0)
-            median = np.median(np.stack(seed_curves), axis=0)
-            axis.plot(x, median, color=NORD["ink"], linewidth=2.2)
-            axis.scatter(x, median, color=colors, s=25, linewidths=0, zorder=3)
+                xs, values = _causal_site_curve(run)
+                seed_curves.append((xs, values))
+                axis.plot(xs, values, color=color, alpha=0.18, linewidth=0.9)
+                axis.scatter(
+                    xs,
+                    values,
+                    color=color,
+                    alpha=0.18,
+                    s=12,
+                    linewidths=0,
+                )
+            median_x, median = _pointwise_median(seed_curves)
+            axis.plot(median_x, median, color=color, linewidth=2.4)
+            axis.scatter(
+                median_x,
+                median,
+                color=color,
+                s=25,
+                linewidths=0,
+                zorder=3,
+            )
             if row == 0:
                 axis.set_title(CONDITION_STYLE[condition][0], fontweight="normal")
             if column == 0:
-                axis.set_ylabel(f"{preset}\nsuccess")
+                axis.set_ylabel(f"{PRESET_LABEL[preset]}\nsuccess")
             axis.set_xticks(
                 x,
-                [PRIORITY_CONTROL_LABEL[name] for name in CONTROL_ORDER],
-                rotation=24,
+                [label for _, label in CAUSAL_SITES],
             )
             axis.set_ylim(-0.03, 1.03)
             axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
@@ -339,7 +568,110 @@ def render_causal_controls(
         ncol=2,
         frameon=False,
     )
-    return _save(fig, output / "priority-causal-controls")
+    figure = captions["figures"][f"{suite}-causal-sites"]
+    return _save_figure(
+        fig,
+        output / f"{suite}-causal-sites",
+        title=str(figure["title"]),
+        caption=str(figure["caption"]),
+    )
+
+
+def render_causal_controls(
+    runs: list[KeyRun],
+    output: Path,
+    presets: tuple[str, ...],
+    suite: str,
+    captions: dict[str, object],
+) -> list[Path]:
+    fig, axes = plt.subplots(
+        len(presets),
+        len(KEY_CONDITIONS),
+        figsize=(9.2, 5.2),
+        constrained_layout=True,
+        squeeze=False,
+        sharex=True,
+        sharey=True,
+    )
+    fig.patch.set_alpha(0)
+    x = np.arange(len(CONTROL_ORDER))
+    for row, preset in enumerate(presets):
+        for column, (_, _, condition) in enumerate(KEY_CONDITIONS):
+            axis = axes[row, column]
+            _, color = CONDITION_STYLE[condition]
+            seed_curves: list[tuple[np.ndarray, np.ndarray]] = []
+            for run in [
+                item
+                for item in runs
+                if item.preset == preset and item.condition == condition
+            ]:
+                values = np.asarray(
+                    [
+                        _causal_value(run, control, position="output")
+                        for control in CONTROL_ORDER
+                    ]
+                )
+                seed_curves.append((x, values))
+                axis.plot(x, values, color=color, alpha=0.18, linewidth=0.85)
+                axis.scatter(
+                    x,
+                    values,
+                    color=color,
+                    alpha=0.18,
+                    s=12,
+                    linewidths=0,
+                )
+            median_x, median = _pointwise_median(seed_curves)
+            axis.plot(median_x, median, color=color, linewidth=2.2)
+            axis.scatter(
+                median_x,
+                median,
+                color=color,
+                s=25,
+                linewidths=0,
+                zorder=3,
+            )
+            if row == 0:
+                axis.set_title(CONDITION_STYLE[condition][0], fontweight="normal")
+            if column == 0:
+                axis.set_ylabel(f"{PRESET_LABEL[preset]}\nsuccess")
+            axis.set_xticks(
+                x,
+                [PRIORITY_CONTROL_LABEL[name] for name in CONTROL_ORDER],
+                rotation=24,
+            )
+            axis.set_ylim(-0.03, 1.03)
+            axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+            _style_axis(axis)
+    fig.legend(
+        handles=[
+            Line2D(
+                [0],
+                [0],
+                color=NORD["muted"],
+                alpha=0.2,
+                linewidth=0.85,
+                label="seeds",
+            ),
+            Line2D(
+                [0],
+                [0],
+                color=NORD["ink"],
+                linewidth=2.2,
+                label="median",
+            ),
+        ],
+        loc="outside lower center",
+        ncol=2,
+        frameon=False,
+    )
+    figure = captions["figures"][f"{suite}-output-final-controls"]
+    return _save_figure(
+        fig,
+        output / f"{suite}-output-final-controls",
+        title=str(figure["title"]),
+        caption=str(figure["caption"]),
+    )
 
 
 def render(
@@ -347,6 +679,7 @@ def render(
     output: Path,
     presets: tuple[str, ...],
 ) -> dict[str, object]:
+    suite = _suite_for(presets)
     invalid_operator = [run.slug for run in runs if not operator_output_valid(run)]
     invalid_causal = [job.slug for job in causal_schedule(runs) if not causal_output_valid(job)]
     gates = {
@@ -358,9 +691,11 @@ def render(
     if not all(gates.values()):
         raise ValueError(f"priority evidence incomplete: {gates}")
     output.mkdir(parents=True, exist_ok=True)
+    captions = _caption_payload(suite, presets)
     artifacts = [
-        *render_spaghetti(runs, output, presets),
-        *render_causal_controls(runs, output, presets),
+        *render_trajectories(runs, output, presets, suite, captions),
+        *render_causal_sites(runs, output, presets, suite, captions),
+        *render_causal_controls(runs, output, presets, suite, captions),
     ]
     summary = []
     for preset in presets:
@@ -372,27 +707,84 @@ def render(
                     "condition": condition,
                     "endpoint_step": HORIZONS[condition],
                     "seed_count": len(selected),
-                    "test_accuracy_median": float(np.median([_behavior_curve(run)[1][-1] for run in selected])),
-                    "canonical_cycle_error_median": float(np.median([_operator_curve(run, "joint_cv_error")[1][-1] for run in selected])),
-                    "usable_mdl_kbit_median": float(np.median([_operator_curve(run, "usable_reuse_gain_bits")[1][-1] for run in selected])),
-                    "canonical_cycle_causal_success_median": float(np.median([_causal_value(run) for run in selected])),
+                    "test_accuracy_median": float(
+                        np.median(
+                            [_behavior_curve(run)[1][-1] for run in selected]
+                        )
+                    ),
+                    "canonical_cycle_error_median": float(
+                        np.median(
+                            [
+                                _operator_curve(run, "joint_cv_error")[1][-1]
+                                for run in selected
+                            ]
+                        )
+                    ),
+                    "alias_heldout_reuse_gain_kbit_median": float(
+                        np.median(
+                            [
+                                _operator_curve(
+                                    run,
+                                    "usable_reuse_gain_bits",
+                                )[1][-1]
+                                for run in selected
+                            ]
+                        )
+                    ),
+                    "canonical_cycle_node0_causal_success_median": float(
+                        np.median(
+                            [
+                                _causal_value(run, position="node")
+                                for run in selected
+                            ]
+                        )
+                    ),
+                    "canonical_cycle_output_final_causal_success_median": float(
+                        np.median(
+                            [
+                                _causal_value(run, position="output")
+                                for run in selected
+                            ]
+                        )
+                    ),
                 }
             )
-    summary_path = output / "priority-endpoint-summary.json"
+    summary_path = output / f"{suite}-endpoint-summary.json"
     atomic_json(summary_path, summary)
     artifacts.append(summary_path)
+    captions_path = output / f"{suite}-figure-captions.json"
+    atomic_json(captions_path, captions)
+    artifacts.append(captions_path)
     manifest_path = output / "priority-render-manifest.json"
     manifest = {
         "status": "complete",
+        "suite": suite,
         "run_count": len(runs),
         "horizons": HORIZONS,
         "mixed_endpoints_explicit": True,
+        "horizon_extrapolation": False,
         "conditions": [condition for _, _, condition in KEY_CONDITIONS],
         "presets": list(presets),
+        "preset_labels": {preset: PRESET_LABEL[preset] for preset in presets},
         "seeds": list(SEEDS),
         "operator_steps": {
-            condition: list(operator_steps_for(next(run for run in runs if run.condition == condition)))
+            condition: list(
+                operator_steps_for(
+                    next(run for run in runs if run.condition == condition)
+                )
+            )
             for condition in HORIZONS
+        },
+        "operator_probe": {
+            "successor_mode": "latent_label_plus_one",
+            "registration": "preregistered before activation inspection",
+            "view": "output",
+            "layer": "model.depth",
+            "projection_fit": "inductive_state_alias_fold",
+            "reuse_gain_scope": (
+                "lookup-vs-shared code scored on held-out aliases only; "
+                "not nested state-and-alias MDL"
+            ),
         },
         "causal_schedule": {
             "clean": "60000",
@@ -400,15 +792,30 @@ def render(
             "random": "30000",
             "probe": "preregistered canonical latent-label k -> k + 1 cycle",
             "successor_mode": "latent_label_plus_one",
-            "patch_sites": [
-                "input node, layer 0",
-                "output residual stream, final layer",
-            ],
+            "patch_sites": {
+                "node0": {
+                    "position": "node",
+                    "layer": 0,
+                    "description": "input-state activation before the first block",
+                },
+                "output_final": {
+                    "position": "output",
+                    "layer": "model.depth",
+                    "description": "output residual stream after the final block",
+                },
+            },
             "folds": 3,
             "controls": list(CONTROL_ORDER),
         },
         "gates": gates,
-        "plot_summary": "faded seeds and bold pointwise medians; no intervals or smoothing",
+        "render_policy": {
+            "seed_trajectories": "faint",
+            "aggregate": "bold pointwise median",
+            "confidence_intervals": False,
+            "smoothing": False,
+            "segments": "connect measured points only",
+        },
+        "captions": captions["figures"],
         "artifacts": [str(path) for path in (*artifacts, manifest_path)],
     }
     atomic_json(manifest_path, manifest)
@@ -425,6 +832,7 @@ def _synthetic_run(
 ) -> KeyRun:
     run = KeyRun(root / f"{condition}-{preset}-s{seed}", task, corruption, condition, preset, seed)
     run.path.mkdir()
+    depth = PRESET_DEPTH[preset]
     order = 17
     successor = (np.arange(order, dtype=np.int64) + 1) % order
     successor_metadata = {
@@ -445,18 +853,46 @@ def _synthetic_run(
             "task_order": order,
             "preset": preset,
             "seed": seed,
-            "model": {"depth": 1},
+            "model": {"depth": depth},
         },
     )
     horizon = horizon_for(run)
     steps = sorted({0, 10_000, 30_000, horizon})
+    behavior_endpoint = {
+        "clean": 0.94,
+        "corrupt15": 0.62,
+        "random": 0.08,
+    }[condition]
     (run.path / "metrics.jsonl").write_text(
         "".join(
-            json.dumps({"step": step, "test_accuracy": min(1.0, step / horizon + seed * 0.01)}) + "\n"
+            json.dumps(
+                {
+                    "step": step,
+                    "test_accuracy": float(
+                        np.clip(
+                            behavior_endpoint * (step / horizon) ** 1.35
+                            + (seed - 1) * 0.015 * (step / max(horizon, 1)),
+                            0.0,
+                            1.0,
+                        )
+                    ),
+                }
+            )
+            + "\n"
             for step in steps
         )
     )
     prefix = operator_prefix(run)
+    error_endpoint = {
+        "clean": 0.18,
+        "corrupt15": 0.55,
+        "random": 0.92,
+    }[condition]
+    gain_endpoint = {
+        "clean": 5_200.0,
+        "corrupt15": 550.0,
+        "random": -450.0,
+    }[condition]
     atomic_json(
         prefix.with_suffix(".json"),
         {
@@ -470,9 +906,16 @@ def _synthetic_run(
                 {
                     "step": step,
                     "view": "output",
-                    "layer": 1,
-                    "joint_cv_error": 1.0 - step / 70_000,
-                    "usable_reuse_gain_bits": step / 12,
+                    "layer": depth,
+                    "joint_cv_error": float(
+                        0.96
+                        + (error_endpoint - 0.96) * (step / horizon)
+                        + (seed - 1) * 0.015
+                    ),
+                    "usable_reuse_gain_bits": float(
+                        gain_endpoint * (step / horizon)
+                        + (seed - 1) * 180.0
+                    ),
                 }
                 for step in operator_steps_for(run)
             ],
@@ -483,7 +926,18 @@ def _synthetic_run(
     job = CausalJob(run, horizon)
     prefix = causal_prefix(job)
     checkpoint = f"weights-{horizon:06d}.pt"
-    sites = (("node", 0), ("output", 1))
+    sites = (("node", 0), ("output", depth))
+    canonical_base = {
+        "clean": {"node": 0.71, "output": 0.88},
+        "corrupt15": {"node": 0.31, "output": 0.44},
+        "random": {"node": 0.04, "output": 0.05},
+    }[condition]
+    control_base = {
+        "exact_state_swap": 0.93,
+        "target_centroid": 0.84,
+        "scrambled_successor": 0.04,
+        "random_orthogonal": 0.03,
+    }
     atomic_json(
         prefix.with_suffix(".json"),
         {
@@ -506,10 +960,18 @@ def _synthetic_run(
                     "position": position,
                     "layer": layer,
                     "control": control,
-                    "qualified_desired_accuracy": (
-                        min(1.0, horizon / 60_000 + seed * 0.01)
-                        if control == "learned_generator"
-                        else 0.03
+                    "qualified_desired_accuracy": float(
+                        np.clip(
+                            (
+                                canonical_base[position]
+                                if control == "learned_generator"
+                                else control_base[control]
+                            )
+                            + (seed - 1) * 0.02
+                            + (fold - 1) * 0.006,
+                            0.0,
+                            1.0,
+                        )
                     ),
                 }
                 for fold in range(3)
@@ -527,6 +989,7 @@ def self_test(
     output: Path | None,
     presets: tuple[str, ...],
 ) -> None:
+    suite = _suite_for(presets)
     context = tempfile.TemporaryDirectory(prefix="render-priority-") if output is None else None
     root = Path(context.name) if context is not None else output
     assert root is not None
@@ -542,15 +1005,79 @@ def self_test(
     figures = root / "figures"
     manifest = render(runs, figures, presets)
     expected = {
-        "priority-spaghetti.png",
-        "priority-spaghetti.pdf",
-        "priority-causal-controls.png",
-        "priority-causal-controls.pdf",
-        "priority-endpoint-summary.json",
+        f"{suite}-trajectories.png",
+        f"{suite}-trajectories.pdf",
+        f"{suite}-causal-sites.png",
+        f"{suite}-causal-sites.pdf",
+        f"{suite}-output-final-controls.png",
+        f"{suite}-output-final-controls.pdf",
+        f"{suite}-endpoint-summary.json",
+        f"{suite}-figure-captions.json",
         "priority-render-manifest.json",
     }
-    if manifest.get("status") != "complete" or not expected.issubset({path.name for path in figures.iterdir()}):
+    observed = {path.name for path in figures.iterdir()}
+    if (
+        manifest.get("status") != "complete"
+        or manifest.get("suite") != suite
+        or not expected.issubset(observed)
+    ):
         raise AssertionError("priority renderer missed an artifact")
+    if manifest.get("horizon_extrapolation") is not False:
+        raise AssertionError("mixed-horizon renderer permits extrapolation")
+    policy = manifest.get("render_policy")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("aggregate") != "bold pointwise median"
+        or policy.get("confidence_intervals") is not False
+        or policy.get("smoothing") is not False
+    ):
+        raise AssertionError("spaghetti render policy is not explicit")
+    captions = load_json(figures / f"{suite}-figure-captions.json")
+    if (
+        not isinstance(captions, dict)
+        or captions.get("probe", {}).get("status") != "preregistered"
+        or "node 0" not in json.dumps(captions)
+        or "output final" not in json.dumps(captions)
+    ):
+        raise AssertionError("figure captions omit probe or intervention sites")
+    summary = load_json(figures / f"{suite}-endpoint-summary.json")
+    if (
+        not isinstance(summary, list)
+        or {int(record["endpoint_step"]) for record in summary} != {30_000, 60_000}
+        or any(
+            "canonical_cycle_node0_causal_success_median" not in record
+            or "canonical_cycle_output_final_causal_success_median" not in record
+            or "alias_heldout_reuse_gain_kbit_median" not in record
+            or "usable_mdl_kbit_median" in record
+            for record in summary
+        )
+    ):
+        raise AssertionError(
+            "endpoint summary obscures horizons, causal sites, or reuse scope"
+        )
+    operator_probe = manifest.get("operator_probe")
+    if (
+        not isinstance(operator_probe, dict)
+        or "held-out aliases only" not in str(operator_probe.get("reuse_gain_scope"))
+    ):
+        raise AssertionError("renderer overstates the alias-held-out reuse code")
+    from PIL import Image
+
+    with Image.open(figures / f"{suite}-trajectories.png") as image:
+        if "preregistered latent-label cycle" not in image.info.get("Description", ""):
+            raise AssertionError("PNG metadata omitted the figure caption")
+    try:
+        _pointwise_median(
+            [
+                (np.asarray([0.0, 1.0]), np.asarray([0.0, 1.0])),
+                (np.asarray([0.0]), np.asarray([0.0])),
+                (np.asarray([0.0, 1.0]), np.asarray([0.0, 1.0])),
+            ]
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("pointwise median accepted mismatched seed grids")
     print(f"self-test passed: {figures}")
     if context is not None:
         context.cleanup()
@@ -561,6 +1088,7 @@ def main() -> None:
     presets = tuple(args.presets) if args.presets else PRESETS
     if len(presets) != 2 or len(set(presets)) != len(presets):
         raise ValueError("--preset must select exactly two distinct presets")
+    _suite_for(presets)
     if args.self_test:
         self_test(args.self_test_output, presets)
         return
