@@ -51,10 +51,17 @@ class Run:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--profile", choices=("pilot", "confirmation"), default="pilot"
+        "--profile",
+        choices=("pilot", "priority", "confirmation"),
+        default="pilot",
     )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--steps", type=int)
+    parser.add_argument(
+        "--seeds", help="Comma-separated seeds or inclusive ranges, e.g. 1-3,7"
+    )
+    parser.add_argument("--presets", help="Comma-separated preset names")
+    parser.add_argument("--conditions", help="Comma-separated condition names")
     parser.add_argument("--limit", type=int)
     parser.add_argument(
         "--output-root",
@@ -81,6 +88,22 @@ def matrix(profile: str) -> list[Run]:
         ]
         runs.append(Run("cycle113", 0.0, "clean", "micro", 0, 60_000, 500))
         return runs
+    if profile == "priority":
+        grok_conditions = CONDITIONS[:4]
+        micro_conditions = tuple(
+            condition
+            for condition in CONDITIONS
+            if condition[2] in {"clean", "corrupt15", "random"}
+        )
+        return [
+            Run(task, corruption, condition, "grok", seed, 150_000, 1_000)
+            for seed in range(1, 4)
+            for task, corruption, condition in grok_conditions
+        ] + [
+            Run(task, corruption, condition, "micro", seed, 150_000, 1_000)
+            for seed in range(1, 4)
+            for task, corruption, condition in micro_conditions
+        ]
     if profile == "confirmation":
         return [
             Run(task, corruption, condition, preset, seed, 150_000, 1_000)
@@ -89,6 +112,24 @@ def matrix(profile: str) -> list[Run]:
             for task, corruption, condition in CONDITIONS
         ]
     raise ValueError(profile)
+
+
+def parse_seeds(value: str) -> set[int]:
+    seeds: set[int] = set()
+    for part in value.split(","):
+        bounds = part.strip().split("-", maxsplit=1)
+        if len(bounds) == 1:
+            seeds.add(int(bounds[0]))
+            continue
+        start, stop = (int(bound) for bound in bounds)
+        if start > stop:
+            raise ValueError(f"descending seed range {part!r}")
+        seeds.update(range(start, stop + 1))
+    return seeds
+
+
+def parse_names(value: str) -> set[str]:
+    return {part.strip() for part in value.split(",") if part.strip()}
 
 
 def command_for(
@@ -204,8 +245,19 @@ def main() -> None:
     runs = matrix(args.profile)
     if args.steps is not None:
         runs = [replace(run, steps=args.steps) for run in runs]
+    if args.seeds:
+        selected_seeds = parse_seeds(args.seeds)
+        runs = [run for run in runs if run.seed in selected_seeds]
+    if args.presets:
+        selected_presets = parse_names(args.presets)
+        runs = [run for run in runs if run.preset in selected_presets]
+    if args.conditions:
+        selected_conditions = parse_names(args.conditions)
+        runs = [run for run in runs if run.condition in selected_conditions]
     if args.limit is not None:
         runs = runs[: args.limit]
+    if not runs:
+        raise ValueError("filters selected no runs")
     manifest = {
         "profile": args.profile,
         "workers": args.workers,
