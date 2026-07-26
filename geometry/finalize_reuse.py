@@ -78,6 +78,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--final-step", type=int, default=150_000)
     parser.add_argument("--step-every", type=int, default=10_000)
+    parser.add_argument(
+        "--causal-step-every",
+        type=int,
+        default=0,
+        help=(
+            "Causal checkpoint interval; zero analyzes only the final checkpoint. "
+            "The dense seed-0 trajectory is run separately."
+        ),
+    )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--poll-seconds", type=float, default=30.0)
@@ -413,7 +422,12 @@ def main() -> None:
     args.results_root.mkdir(parents=True, exist_ok=True)
     args.log_root.mkdir(parents=True, exist_ok=True)
     args.figure_root.mkdir(parents=True, exist_ok=True)
-    steps = requested_steps(args.final_step, args.step_every)
+    operator_steps = requested_steps(args.final_step, args.step_every)
+    causal_steps = (
+        [args.final_step]
+        if args.causal_step_every == 0
+        else requested_steps(args.final_step, args.causal_step_every)
+    )
     script_root = Path(__file__).parent
 
     runs = wait_for_confirmation(args)
@@ -427,7 +441,8 @@ def main() -> None:
         "created_at": now(),
         "confirmation_manifest": str(args.confirmation_manifest),
         "final_step": args.final_step,
-        "steps": steps,
+        "operator_steps": operator_steps,
+        "causal_steps": causal_steps,
         "workers": args.workers,
         "device": args.device,
         "min_free_gb": args.min_free_gb,
@@ -445,7 +460,7 @@ def main() -> None:
         script=script_root / "operator_reuse.py",
         runs=grok_runs,
         log_root=args.log_root,
-        steps=steps,
+        steps=operator_steps,
         workers=args.workers,
         device=args.device,
         min_free_gb=args.min_free_gb,
@@ -455,7 +470,7 @@ def main() -> None:
         script=script_root / "causal_reuse.py",
         runs=causal_runs,
         log_root=args.log_root,
-        steps=steps,
+        steps=causal_steps,
         workers=args.workers,
         device=args.device,
         min_free_gb=args.min_free_gb,
@@ -471,6 +486,10 @@ def main() -> None:
         str(args.results_root),
         "--output",
         str(args.figure_root),
+        "--operator-view",
+        "output",
+        "--operator-layer",
+        "last",
     ]
     with render_log.open("a") as log:
         log.write(f"\n{now()} START {' '.join(render_command)}\n")
