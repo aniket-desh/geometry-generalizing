@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
             "anchor",
             "breadth-pilot",
             "breadth-extend",
+            "breadth-diagnostics",
             "breadth",
             "scale",
         ),
@@ -113,6 +114,25 @@ def matrix(profile: str) -> list[Run]:
                 dense_checkpoint_every=500,
             )
             for task in BREADTH_PILOT_TASKS
+        ]
+    if profile == "breadth-diagnostics":
+        return [
+            Run(
+                task,
+                preset,
+                0,
+                60_000,
+                4096,
+                eval_every=250,
+                snapshot_every=500,
+                checkpoint_every=3_000,
+                keep_checkpoints=2,
+                dense_checkpoint_every=500,
+            )
+            for task, preset in (
+                ("cycle12", "micro"),
+                ("dihedral12", "small"),
+            )
         ]
     if profile == "breadth":
         tasks = (
@@ -238,16 +258,21 @@ def run_one(
 
 def main() -> None:
     args = parse_args()
-    uses_breadth_pilot_runs = args.profile in {"breadth-pilot", "breadth-extend"}
-    output_root = args.output_root or Path(
-        "/workspace/geometry-breadth-results"
-        if uses_breadth_pilot_runs
-        else "/workspace/geometry-results"
-    )
+    default_output_root = {
+        "breadth-pilot": "/workspace/geometry-breadth-results",
+        "breadth-extend": "/workspace/geometry-breadth-results",
+        "breadth-diagnostics": (
+            "/workspace/geometry-breadth-diagnostic-results"
+        ),
+    }.get(args.profile, "/workspace/geometry-results")
+    output_root = args.output_root or Path(default_output_root)
     log_root = args.log_root or Path(
         {
             "breadth-pilot": "/workspace/geometry-breadth-logs",
             "breadth-extend": "/workspace/geometry-breadth-extend-logs",
+            "breadth-diagnostics": (
+                "/workspace/geometry-breadth-diagnostic-logs"
+            ),
         }.get(args.profile, "/workspace/geometry-logs")
     )
     output_root.mkdir(parents=True, exist_ok=True)
