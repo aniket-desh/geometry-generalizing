@@ -171,19 +171,31 @@ def remove_template_offsets(samples: np.ndarray) -> np.ndarray:
 
 def mature_phase_projection(frames: list[np.ndarray]) -> list[np.ndarray]:
     final = frames[-1]
+    contexts_per_day = len(WEEKDAYS.activation_templates)
+    final_day_centroids = final.reshape(
+        len(WEEKDAYS.values),
+        contexts_per_day,
+        -1,
+    ).mean(axis=1)
     phase = 2 * np.pi * np.arange(len(WEEKDAYS.values)) / len(
         WEEKDAYS.values
     )
     targets = np.column_stack((np.cos(phase), np.sin(phase)))
-    targets = np.repeat(targets, len(WEEKDAYS.activation_templates), axis=0)
-    gram = final @ final.T
+    gram = final_day_centroids @ final_day_centroids.T
     ridge = 1e-3 * np.trace(gram) / max(len(gram), 1)
-    decoder = final.T @ np.linalg.solve(
+    decoder = final_day_centroids.T @ np.linalg.solve(
         gram + ridge * np.eye(len(gram)),
         targets,
     )
     projected = [frame @ decoder for frame in frames]
-    final_radius = np.sqrt(np.mean(np.sum(projected[-1] ** 2, axis=1)))
+    final_projected_centroids = projected[-1].reshape(
+        len(WEEKDAYS.values),
+        contexts_per_day,
+        -1,
+    ).mean(axis=1)
+    final_radius = np.sqrt(
+        np.mean(np.sum(final_projected_centroids**2, axis=1))
+    )
     return [frame / max(final_radius, 1e-12) for frame in projected]
 
 
