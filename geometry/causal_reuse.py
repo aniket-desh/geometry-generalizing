@@ -1029,6 +1029,18 @@ def main() -> None:
             raise ValueError(
                 "reconstructed relation-token layout does not match the run"
             )
+    elif "token_seed" not in config:
+        surface_count = order * int(config["aliases"])
+        layout.node_tokens = (
+            torch.arange(surface_count, device=device)
+            .reshape(int(config["aliases"]), order)
+            .add(layout.node_base)
+        )
+        layout.relation_tokens = (
+            torch.arange(surface_count, device=device)
+            .reshape(int(config["aliases"]), order)
+            .add(layout.relation_base)
+        )
 
     model_config = ModelConfig(**config["model"])
     model = GeometryTransformer(
