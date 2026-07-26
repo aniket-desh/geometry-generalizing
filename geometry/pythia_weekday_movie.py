@@ -217,14 +217,13 @@ def render_gif(
     axis.set_yticks([])
     axis.spines[:].set_visible(False)
 
-    points = axis.scatter([], [], s=16, alpha=0.28)
-    centroids = axis.scatter(
+    points = axis.scatter(
         [],
         [],
-        s=58,
+        s=28,
+        alpha=0.75,
         edgecolors="white",
-        linewidths=0.8,
-        zorder=3,
+        linewidths=0.35,
     )
     step_label = axis.text(
         0.02,
@@ -262,15 +261,10 @@ def render_gif(
 
     def update(index: int):
         frame = frames[index]
-        centers = np.stack(
-            [frame[groups == group].mean(axis=0) for group in range(7)]
-        )
         points.set_offsets(frame)
         points.set_color([NORD[group] for group in groups])
-        centroids.set_offsets(centers)
-        centroids.set_color(NORD)
         step_label.set_text(f"step {steps[index]:,}")
-        return points, centroids, step_label
+        return points, step_label
 
     animation = FuncAnimation(
         fig,
