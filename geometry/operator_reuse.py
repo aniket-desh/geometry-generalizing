@@ -230,9 +230,13 @@ def lookup_vs_shared_successor_code(
         return {
             "shared_successor_error": float("nan"),
             "lookup_error": float("nan"),
+            "null_error": float("nan"),
             "shared_successor_bits": float("nan"),
             "lookup_bits": float("nan"),
+            "null_bits": float("nan"),
             "lookup_reuse_gain_bits": float("nan"),
+            "shared_vs_null_gain_bits": float("nan"),
+            "usable_reuse_gain_bits": float("nan"),
         }
     states = np.arange(coordinates.shape[0])
     x_train, y_train = _cartesian_examples(
@@ -256,6 +260,9 @@ def lookup_vs_shared_successor_code(
     lookup_error, lookup_sse, _ = normalized_error(
         lookup_prediction, y_test
     )
+    null_error, null_sse, _ = normalized_error(
+        np.zeros_like(y_test), y_test
+    )
 
     dimension = coordinates.shape[-1]
     shared_parameters = dimension * (dimension - 1) // 2
@@ -272,12 +279,22 @@ def lookup_vs_shared_successor_code(
         parameter_count=lookup_parameters,
         precision=precision,
     )
+    null_bits = bic_code_bits(
+        sse=null_sse,
+        scalar_count=scalar_count,
+        parameter_count=0,
+        precision=precision,
+    )
     return {
         "shared_successor_error": shared_error,
         "lookup_error": lookup_error,
+        "null_error": null_error,
         "shared_successor_bits": shared_bits,
         "lookup_bits": lookup_bits,
+        "null_bits": null_bits,
         "lookup_reuse_gain_bits": lookup_bits - shared_bits,
+        "shared_vs_null_gain_bits": null_bits - shared_bits,
+        "usable_reuse_gain_bits": min(lookup_bits, null_bits) - shared_bits,
     }
 
 
@@ -476,9 +493,13 @@ def analyze_activation_layer(
         "closure_empirical_error",
         "shared_successor_error",
         "lookup_error",
+        "null_error",
         "shared_successor_bits",
         "lookup_bits",
+        "null_bits",
         "lookup_reuse_gain_bits",
+        "shared_vs_null_gain_bits",
+        "usable_reuse_gain_bits",
         "multi_power_generator_bits",
         "multi_power_independent_bits",
         "multi_power_reuse_gain_bits",
@@ -516,9 +537,13 @@ def degenerate_summary(powers: list[int], reason: str) -> dict[str, object]:
         "closure_empirical_error": None,
         "shared_successor_error": None,
         "lookup_error": None,
+        "null_error": None,
         "shared_successor_bits": None,
         "lookup_bits": None,
+        "null_bits": None,
         "lookup_reuse_gain_bits": None,
+        "shared_vs_null_gain_bits": None,
+        "usable_reuse_gain_bits": None,
         "multi_power_generator_bits": None,
         "multi_power_independent_bits": None,
         "multi_power_reuse_gain_bits": None,
@@ -730,9 +755,15 @@ def run_self_test() -> None:
         raise AssertionError(f"structured closure error is too large: {structured}")
     if float(structured["lookup_reuse_gain_bits"]) <= 0.0:
         raise AssertionError(f"ring lookup reuse gain is not positive: {structured}")
+    if float(structured["usable_reuse_gain_bits"]) <= 0.0:
+        raise AssertionError(f"ring usable reuse gain is not positive: {structured}")
     if float(control["lookup_reuse_gain_bits"]) >= 0.0:
         raise AssertionError(
             f"scrambled lookup reuse gain is not negative: {control}"
+        )
+    if float(control["usable_reuse_gain_bits"]) >= 0.0:
+        raise AssertionError(
+            f"scrambled usable reuse gain is not negative: {control}"
         )
     if float(control["joint_cv_error"]) <= float(structured["joint_cv_error"]) + 0.5:
         raise AssertionError("scrambled control did not destroy generator transfer")
@@ -741,7 +772,8 @@ def run_self_test() -> None:
         f"joint={structured['joint_cv_error']:.6f}, "
         f"closure={structured['closure_empirical_error']:.6f}, "
         f"ring_lookup_gain={structured['lookup_reuse_gain_bits']:.1f} bits, "
-        f"scrambled_lookup_gain={control['lookup_reuse_gain_bits']:.1f} bits"
+        f"ring_usable_gain={structured['usable_reuse_gain_bits']:.1f} bits, "
+        f"scrambled_usable_gain={control['usable_reuse_gain_bits']:.1f} bits"
     )
 
 
@@ -923,7 +955,8 @@ def main() -> None:
             "parameter penalty; the shared model pays for one orthogonal "
             "successor and the lookup pays for one displacement vector per "
             "source state, with both fitted on training aliases and residuals "
-            "scored on held-out aliases"
+            "scored on held-out aliases; the zero-prediction null pays no "
+            "transition parameters and directly codes the held-out targets"
         ),
         "multi_power_code": (
             "fixed-precision Gaussian residual bits plus a BIC penalty; "
