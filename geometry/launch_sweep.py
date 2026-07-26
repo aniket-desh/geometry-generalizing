@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -24,23 +25,31 @@ class Run:
     eval_contexts: int = 8
     eval_every: int = 100
     snapshot_every: int = 500
+    checkpoint_every: int = 10_000
+    keep_checkpoints: int = 0
+    dense_checkpoint_every: int = 0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--profile",
-        choices=("pilot", "anchor", "breadth", "scale"),
+        choices=("pilot", "anchor", "breadth-pilot", "breadth", "scale"),
         default="pilot",
     )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument(
-        "--output-root", type=Path, default=Path("/workspace/geometry-results")
+        "--output-root",
+        type=Path,
     )
     parser.add_argument(
-        "--log-root", type=Path, default=Path("/workspace/geometry-logs")
+        "--log-root",
+        type=Path,
     )
+    parser.add_argument("--min-free-gb", type=float, default=8.0)
     parser.add_argument("--compile", action="store_true")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
 
@@ -67,6 +76,33 @@ def matrix(profile: str) -> list[Run]:
                 snapshot_every=500,
             )
             for seed in range(4)
+        ]
+    if profile == "breadth-pilot":
+        tasks = (
+            "torus5",
+            "xor16",
+            "dihedral12",
+            "path16",
+            "tree15",
+            "broken12",
+            "random31",
+            "cycle24",
+            "cycle31",
+        )
+        return [
+            Run(
+                task,
+                "micro",
+                0,
+                12_000,
+                4096,
+                eval_every=250,
+                snapshot_every=500,
+                checkpoint_every=3_000,
+                keep_checkpoints=2,
+                dense_checkpoint_every=500,
+            )
+            for task in tasks
         ]
     if profile == "breadth":
         tasks = (
@@ -119,9 +155,23 @@ def run_one(
     output_root: Path,
     log_root: Path,
     compile_model: bool,
+    device: str,
+    min_free_gb: float,
 ) -> dict[str, object]:
     slug = f"{run.task}-{run.preset}-s{run.seed}"
     log_path = log_root / f"{slug}.log"
+    available = shutil.disk_usage(output_root).free / (1024**3)
+    if available < min_free_gb:
+        return {
+            **asdict(run),
+            "returncode": 75,
+            "elapsed_seconds": 0.0,
+            "error": (
+                f"disk guard: {available:.1f} GiB free is below "
+                f"{min_free_gb:.1f} GiB"
+            ),
+            "log": str(log_path),
+        }
     command = [
         sys.executable,
         str(Path(__file__).with_name("train.py")),
@@ -150,9 +200,17 @@ def run_one(
         "--snapshot-every",
         str(run.snapshot_every),
         "--checkpoint-every",
-        "10000",
+        str(run.checkpoint_every),
+        "--keep-checkpoints",
+        str(run.keep_checkpoints),
+        "--dense-checkpoint-every",
+        str(run.dense_checkpoint_every),
+        "--dense-checkpoint-dtype",
+        "float16",
         "--output-root",
         str(output_root),
+        "--device",
+        device,
         "--resume",
     ]
     if compile_model:
@@ -170,18 +228,35 @@ def run_one(
 
 def main() -> None:
     args = parse_args()
-    args.output_root.mkdir(parents=True, exist_ok=True)
-    args.log_root.mkdir(parents=True, exist_ok=True)
+    output_root = args.output_root or Path(
+        "/workspace/geometry-breadth-results"
+        if args.profile == "breadth-pilot"
+        else "/workspace/geometry-results"
+    )
+    log_root = args.log_root or Path(
+        "/workspace/geometry-breadth-logs"
+        if args.profile == "breadth-pilot"
+        else "/workspace/geometry-logs"
+    )
+    output_root.mkdir(parents=True, exist_ok=True)
+    log_root.mkdir(parents=True, exist_ok=True)
     runs = matrix(args.profile)
     manifest = {
         "profile": args.profile,
         "workers": args.workers,
         "compile": args.compile,
+        "device": args.device,
+        "output_root": str(output_root),
+        "log_root": str(log_root),
+        "min_free_gb": args.min_free_gb,
         "runs": [asdict(run) for run in runs],
     }
-    (args.log_root / f"{args.profile}-manifest.json").write_text(
+    (log_root / f"{args.profile}-manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n"
     )
+    if args.dry_run:
+        print(json.dumps(manifest, indent=2))
+        return
     print(
         f"launching {len(runs)} runs with {args.workers} workers",
         flush=True,
@@ -192,9 +267,11 @@ def main() -> None:
             executor.submit(
                 run_one,
                 run,
-                output_root=args.output_root,
-                log_root=args.log_root,
+                output_root=output_root,
+                log_root=log_root,
                 compile_model=args.compile,
+                device=args.device,
+                min_free_gb=args.min_free_gb,
             )
             for run in runs
         ]
@@ -206,7 +283,7 @@ def main() -> None:
                 f"rc={result['returncode']} in {result['elapsed_seconds']:.1f}s",
                 flush=True,
             )
-    (args.log_root / f"{args.profile}-results.json").write_text(
+    (log_root / f"{args.profile}-results.json").write_text(
         json.dumps(results, indent=2) + "\n"
     )
     failures = [result for result in results if result["returncode"] != 0]
