@@ -1007,13 +1007,21 @@ def main() -> None:
         seed=int(config.get("token_seed", config["seed"])),
         device=device,
     )
-    saved_layout = np.load(run_dir / "token_layout.npz")
-    if not np.array_equal(layout.node_tokens.cpu().numpy(), saved_layout["node"]):
-        raise ValueError("reconstructed node-token layout does not match the run")
-    if not np.array_equal(
-        layout.relation_tokens.cpu().numpy(), saved_layout["relation"]
-    ):
-        raise ValueError("reconstructed relation-token layout does not match the run")
+    layout_path = run_dir / "token_layout.npz"
+    if layout_path.exists():
+        saved_layout = np.load(layout_path)
+        if not np.array_equal(
+            layout.node_tokens.cpu().numpy(), saved_layout["node"]
+        ):
+            raise ValueError(
+                "reconstructed node-token layout does not match the run"
+            )
+        if not np.array_equal(
+            layout.relation_tokens.cpu().numpy(), saved_layout["relation"]
+        ):
+            raise ValueError(
+                "reconstructed relation-token layout does not match the run"
+            )
 
     model_config = ModelConfig(**config["model"])
     model = GeometryTransformer(
