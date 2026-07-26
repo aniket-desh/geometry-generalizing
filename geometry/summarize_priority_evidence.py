@@ -18,12 +18,14 @@ from key60_common import (
     SEEDS,
     KeyRun,
 )
-from priority_common import HORIZONS, operator_steps_for
+from priority_common import BATCH_SIZE_BY_PRESET, HORIZONS, operator_steps_for
 
 
 SUITE_PRESETS = {
     "core": ("grok", "micro"),
     "scale": ("small", "medium"),
+    "large": ("large",),
+    "capacity": ("small", "medium", "large"),
 }
 NEGATIVE_CAUSAL_CONTROLS = (
     "scrambled_successor",
@@ -119,8 +121,8 @@ def _select_suite(results_root: Path, requested: str) -> str:
     candidates = _candidate_suites(results_root)
     if len(candidates) != 1:
         raise EvidenceError(
-            "automatic suite detection requires exactly one complete core or "
-            f"scale identity set; found {candidates or 'none'}"
+            "automatic suite detection requires exactly one complete suite; "
+            f"found {candidates or 'none'}"
         )
     return candidates[0]
 
@@ -134,7 +136,7 @@ def _validate_config(
     seed: int,
 ) -> None:
     horizon = HORIZONS[condition]
-    expected_batch = 2_048 if preset == "medium" else 4_096
+    expected_batch = BATCH_SIZE_BY_PRESET[preset]
     expected_task = next(
         task for task, _, name in KEY_CONDITIONS if name == condition
     )
@@ -165,6 +167,18 @@ def _validate_config(
             "train_fraction": abs(float(config["train_fraction"]) - 0.3) < 1e-8,
             "weight_decay": abs(float(config["weight_decay"]) - 1.0) < 1e-8,
         }
+        if preset == "large":
+            checks.update(
+                {
+                    "eval_every": int(config["eval_every"]) == 1_000,
+                    "snapshot_every": int(config["snapshot_every"]) == 5_000,
+                    "dense_checkpoint_every": (
+                        int(config["dense_checkpoint_every"]) == 10_000
+                    ),
+                    "checkpoint_every": int(config["checkpoint_every"]) == 30_000,
+                    "keep_checkpoints": int(config["keep_checkpoints"]) == 2,
+                }
+            )
     except (KeyError, TypeError, ValueError) as error:
         raise EvidenceError(f"invalid priority config in {run_dir}") from error
     failed = [name for name, valid in checks.items() if not valid]
@@ -176,6 +190,11 @@ def _validate_config(
     model = config.get("model")
     if not isinstance(model, dict) or int(model.get("depth", -1)) < 1:
         raise EvidenceError(f"{run_dir.name} has no valid model depth")
+    if preset == "large" and (
+        int(model.get("width", -1)) != 768
+        or int(model.get("depth", -1)) != 8
+    ):
+        raise EvidenceError(f"{run_dir.name} is not the large 768x8 preset")
 
 
 def _discover_runs(results_root: Path, suite: str) -> list[KeyRun]:
@@ -203,9 +222,10 @@ def _discover_runs(results_root: Path, suite: str) -> list[KeyRun]:
     duplicate = sorted(
         identity for identity in expected if len(indexed.get(identity, [])) != 1
     )
+    expected_count = len(expected)
     if missing or duplicate:
         raise EvidenceError(
-            "priority matrix is not the exact 18-run identity set; "
+            f"priority matrix is not the exact {expected_count}-run identity set; "
             f"missing={missing}, nonunique={duplicate}"
         )
 
@@ -267,8 +287,8 @@ def _discover_runs(results_root: Path, suite: str) -> list[KeyRun]:
                 seed=seed,
             )
         )
-    if len(runs) != 18:
-        raise EvidenceError(f"expected 18 runs, found {len(runs)}")
+    if len(runs) != expected_count:
+        raise EvidenceError(f"expected {expected_count} runs, found {len(runs)}")
     return sorted(runs, key=lambda run: (run.preset, run.condition, run.seed))
 
 
@@ -1039,6 +1059,7 @@ def _synthetic_fixture(root: Path, *, suite: str = "core") -> None:
                     "micro": 2,
                     "small": 4,
                     "medium": 6,
+                    "large": 8,
                 }[preset]
                 config = {
                     "run_name": run_name,
@@ -1053,10 +1074,18 @@ def _synthetic_fixture(root: Path, *, suite: str = "core") -> None:
                     "steps": horizon,
                     "aliases": 4,
                     "contexts": 16,
-                    "batch_size": 2_048 if preset == "medium" else 4_096,
+                    "batch_size": BATCH_SIZE_BY_PRESET[preset],
+                    "eval_every": 1_000,
+                    "snapshot_every": 5_000,
+                    "dense_checkpoint_every": 10_000,
+                    "checkpoint_every": 30_000,
+                    "keep_checkpoints": 2,
                     "train_fraction": 0.3,
                     "weight_decay": 1.0,
-                    "model": {"depth": depth},
+                    "model": {
+                        "width": 768 if preset == "large" else 128,
+                        "depth": depth,
+                    },
                     "task_table_sha256": hashlib.sha256(table.tobytes()).hexdigest(),
                 }
                 _atomic_text(
@@ -1237,17 +1266,29 @@ def self_test() -> None:
             or summary["validation"]["exact_run_count"] != 18
         ):
             raise AssertionError("synthetic scale suite was not validated")
+    with tempfile.TemporaryDirectory(
+        prefix="priority-large-evidence-summary-"
+    ) as temporary:
+        root = Path(temporary)
+        _synthetic_fixture(root, suite="large")
+        summary = summarize(results_root=root, suite="auto")
+        if (
+            summary["suite"] != "large"
+            or summary["validation"]["presets"] != ["large"]
+            or summary["validation"]["exact_run_count"] != 9
+        ):
+            raise AssertionError("synthetic large suite was not validated")
     print(
-        "self-test passed for core and scale: exact 18-run identity and horizons, "
-        "behavior crossing and drawdown, canonical split agreement, preregistered "
-        "successor hash, operator reuse, causal sites, and control maxima"
+        "self-test passed for core, scale, and large: exact suite identities and "
+        "horizons, behavior crossing and drawdown, canonical split agreement, "
+        "preregistered successor hash, operator reuse, causal sites, and controls"
     )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate and summarize one complete 18-run core or scale priority suite."
+            "Validate and summarize one exact core, scale, large, or capacity suite."
         )
     )
     parser.add_argument("--results-root", type=Path)

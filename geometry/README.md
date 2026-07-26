@@ -185,6 +185,37 @@ key analysis-slot directory, so together they never exceed the configured
 analysis concurrency. A 5%-corruption extension is intentionally excluded from
 this launch plan until the matched three-seed evidence is complete.
 
+The isolated H100 extension adds only the existing `large` preset (768×8):
+three seeds each for clean 60k, 15%-corrupted 30k, and random-table 30k. It
+uses batch size 1024, evaluates every 1k steps, saves activation snapshots every
+5k, and writes float16 dense weights every 10k. Its nine runs are assigned to
+four explicit, disjoint 90k-step shards:
+
+```bash
+# Audit the exact matrix and all tmux commands without starting anything.
+LARGE_LAUNCH_TRAIN=1 LARGE_LAUNCH_ANALYSIS=0 \
+  geometry/launch_large_tmux.sh --dry-run
+
+# Start the four training shards, restricted to physical GPUs 0-3.
+LARGE_LAUNCH_TRAIN=1 LARGE_LAUNCH_ANALYSIS=0 \
+  geometry/launch_large_tmux.sh
+
+# After training, start operator, causal, and rendering sessions.
+LARGE_LAUNCH_TRAIN=0 LARGE_LAUNCH_ANALYSIS=1 \
+  geometry/launch_large_tmux.sh
+```
+
+The launcher defaults to a 40 GiB free-space guard and resumable 30k-step
+optimizer checkpoints. Large outputs use their own work root,
+`/home/ubuntu/a/vi-activation-geometry-large-work`, and never share result or
+log directories with the completed core or scale suites. Summarize the exact
+nine-run suite with `--suite large`. To render or summarize a unified
+small/medium/large comparison, pass all 27 analyzed run directories to
+`render_priority.py --preset small --preset medium --preset large`, or place
+them under one root and select `--suite capacity` explicitly. Automatic suite
+detection rejects that mixed root because it contains multiple complete
+sub-suites.
+
 `reproduce_engels_geometry.py` reruns the GPT-2 small layer-7 SAE feature
 clusters reported by Engels et al. on the Pile, retaining only the weekday and
 twentieth-century-year manifolds and rendering them in the visual style used by

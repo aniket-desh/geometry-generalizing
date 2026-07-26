@@ -83,6 +83,33 @@ class PriorityEvidenceSummaryTest(unittest.TestCase):
             )
             self.assertEqual(summary["validation"]["exact_run_count"], 18)
 
+    def test_large_matrix_is_exactly_nine_runs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="priority-summary-large-") as temporary:
+            root = Path(temporary)
+            _synthetic_fixture(root, suite="large")
+
+            summary = summarize(results_root=root, suite="auto")
+
+            self.assertEqual(summary["suite"], "large")
+            self.assertEqual(summary["validation"]["presets"], ["large"])
+            self.assertEqual(summary["validation"]["exact_run_count"], 9)
+            self.assertEqual(len(summary["groups"]), 3)
+
+    def test_capacity_comparison_requires_exact_27_run_union(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="priority-summary-capacity-") as temporary:
+            root = Path(temporary)
+            _synthetic_fixture(root, suite="capacity")
+
+            with self.assertRaisesRegex(EvidenceError, "exactly one complete suite"):
+                summarize(results_root=root, suite="auto")
+
+            summary = summarize(results_root=root, suite="capacity")
+            self.assertEqual(summary["validation"]["exact_run_count"], 27)
+            self.assertEqual(
+                summary["validation"]["presets"],
+                ["small", "medium", "large"],
+            )
+
     def test_duplicate_identity_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="priority-summary-duplicate-") as temporary:
             root = Path(temporary)

@@ -29,6 +29,7 @@ from key60_common import (
 )
 from key60_pipeline import _run_with_capped_log
 from priority_common import (
+    BATCH_SIZE_BY_PRESET,
     HORIZONS,
     analysis_slot,
     causal_output_valid,
@@ -71,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--presets",
         default="grok,micro",
-        help="Comma-separated pair of matched model presets.",
+        help="One exact analysis suite: grok,micro; small,medium; or large.",
     )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--analysis-slots", type=int, default=2)
@@ -88,10 +89,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def _parse_presets(value: str) -> tuple[str, ...]:
-    presets = tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
-    if len(presets) != 2:
-        raise ValueError("--presets must select exactly two distinct model presets")
-    if any(preset not in {"grok", "micro", "small", "medium"} for preset in presets):
+    presets = tuple(item.strip() for item in value.split(",") if item.strip())
+    supported = {
+        frozenset(("grok", "micro")),
+        frozenset(("small", "medium")),
+        frozenset(("large",)),
+    }
+    if len(presets) != len(set(presets)) or frozenset(presets) not in supported:
         raise ValueError(f"unsupported priority presets: {presets}")
     return presets
 
@@ -469,13 +473,17 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
         ).hexdigest(),
         "generator_relation": None,
     }
+    model = config.get("model")
+    if not isinstance(model, dict):
+        raise ValueError(f"missing synthetic model config: {run.path}")
+    depth = int(model["depth"])
     prefix = operator_prefix(run)
     records = [
         {
             "step": step,
             "checkpoint": f"weights-{step:06d}.pt",
             "view": "output",
-            "layer": 1,
+            "layer": depth,
             "joint_cv_error": 0.5,
             "usable_reuse_gain_bits": 100.0,
         }
@@ -498,7 +506,6 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
     job = CausalJob(run, horizon_for(run))
     prefix = causal_prefix(job)
     checkpoint = f"weights-{job.step:06d}.pt"
-    depth = 1
     sites = (("node", 0), ("output", depth))
     causal_records = [
         {
@@ -554,10 +561,18 @@ def self_test(presets: tuple[str, ...]) -> None:
                     "token_seed": 100_000 + seed,
                     "aliases": 4,
                     "contexts": 16,
-                    "batch_size": 2048 if preset == "medium" else 4096,
+                    "batch_size": BATCH_SIZE_BY_PRESET[preset],
+                    "eval_every": 1_000,
+                    "snapshot_every": 5_000,
+                    "dense_checkpoint_every": 10_000,
+                    "checkpoint_every": 30_000,
+                    "keep_checkpoints": 2,
                     "train_fraction": 0.3,
                     "weight_decay": 1.0,
-                    "model": {"depth": 1},
+                    "model": {
+                        "width": 768 if preset == "large" else 128,
+                        "depth": 8 if preset == "large" else 1,
+                    },
                 },
             )
             horizon = HORIZONS[condition]
@@ -581,8 +596,14 @@ def self_test(presets: tuple[str, ...]) -> None:
         shards = [
             _shard_specs(_job_specs(presets), index, 4) for index in range(4)
         ]
-        if [len(shard) for shard in shards] != [5, 5, 4, 4]:
-            raise AssertionError("18 causal jobs did not partition across four shards")
+        quotient, remainder = divmod(expected_count, 4)
+        expected_shard_sizes = [
+            quotient + (index < remainder) for index in range(4)
+        ]
+        if [len(shard) for shard in shards] != expected_shard_sizes:
+            raise AssertionError(
+                f"{expected_count} causal jobs did not partition across four shards"
+            )
         flattened = [spec for shard in shards for spec in shard]
         if len(flattened) != len(set(flattened)):
             raise AssertionError("causal shards overlap")
@@ -590,8 +611,9 @@ def self_test(presets: tuple[str, ...]) -> None:
         if (control.path / "weights-060000.pt").exists():
             raise AssertionError("synthetic control unexpectedly has a 60k checkpoint")
     print(
-        "self-test passed: 18 mixed-horizon runs, per-condition operator steps, "
-        "18 endpoint causal jobs, and four disjoint causal shards"
+        f"self-test passed: {expected_count} mixed-horizon runs, per-condition "
+        f"operator steps, {expected_count} endpoint causal jobs, and four "
+        "disjoint causal shards"
     )
 
 

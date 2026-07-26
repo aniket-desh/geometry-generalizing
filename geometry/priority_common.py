@@ -29,6 +29,13 @@ HORIZONS = {
     "corrupt15": 30_000,
     "random": 30_000,
 }
+BATCH_SIZE_BY_PRESET = {
+    "grok": 4_096,
+    "micro": 4_096,
+    "small": 4_096,
+    "medium": 2_048,
+    "large": 1_024,
+}
 BASE_OPERATOR_STEPS = (10_000, 30_000)
 
 
@@ -115,7 +122,18 @@ def _identity_valid(
     try:
         seed = int(config["seed"])
         preset = str(config.get("preset"))
-        expected_batch_size = 2_048 if preset == "medium" else 4_096
+        expected_batch_size = BATCH_SIZE_BY_PRESET[preset]
+        model = config.get("model")
+        large_protocol_valid = preset != "large" or (
+            int(config.get("eval_every", -1)) == 1_000
+            and int(config.get("snapshot_every", -1)) == 5_000
+            and int(config.get("dense_checkpoint_every", -1)) == 10_000
+            and int(config.get("checkpoint_every", -1)) == 30_000
+            and int(config.get("keep_checkpoints", -1)) == 2
+            and isinstance(model, dict)
+            and int(model.get("width", -1)) == 768
+            and int(model.get("depth", -1)) == 8
+        )
         return (
             preset in presets
             and int(config.get("split_seed", seed)) == seed
@@ -126,6 +144,7 @@ def _identity_valid(
             and int(config.get("batch_size", -1)) == expected_batch_size
             and abs(float(config.get("train_fraction", -1.0)) - 0.3) < 1e-8
             and abs(float(config.get("weight_decay", -1.0)) - 1.0) < 1e-8
+            and large_protocol_valid
         )
     except (KeyError, TypeError, ValueError):
         return False

@@ -54,18 +54,22 @@ PRIORITY_CONTROL_LABEL = {
 SUITE_PRESETS = {
     frozenset(("grok", "micro")): "core",
     frozenset(("small", "medium")): "scale",
+    frozenset(("large",)): "large",
+    frozenset(("small", "medium", "large")): "capacity",
 }
 PRESET_LABEL = {
     "grok": "grok · 128×1",
     "micro": "micro · 128×2",
     "small": "small · 256×4",
     "medium": "medium · 512×6",
+    "large": "large · 768×8",
 }
 PRESET_DEPTH = {
     "grok": 1,
     "micro": 2,
     "small": 4,
     "medium": 6,
+    "large": 8,
 }
 CAUSAL_SITES = (
     ("node", "node 0"),
@@ -89,8 +93,8 @@ def _suite_for(presets: tuple[str, ...]) -> str:
     suite = SUITE_PRESETS.get(frozenset(presets))
     if suite is None:
         raise ValueError(
-            "priority figures require the core pair (grok, micro) or "
-            "the scale pair (small, medium)"
+            "priority figures require core (grok,micro), scale (small,medium), "
+            "large, or capacity (small,medium,large)"
         )
     return suite
 
@@ -423,7 +427,7 @@ def render_trajectories(
     fig, axes = plt.subplots(
         len(presets),
         len(specs),
-        figsize=(10.1, 5.25),
+        figsize=(10.1, 2.35 * len(presets) + 0.55),
         constrained_layout=True,
         squeeze=False,
         sharex="col",
@@ -509,7 +513,7 @@ def render_causal_sites(
     fig, axes = plt.subplots(
         len(presets),
         len(KEY_CONDITIONS),
-        figsize=(9.2, 5.2),
+        figsize=(9.2, 2.35 * len(presets) + 0.55),
         constrained_layout=True,
         squeeze=False,
         sharex=True,
@@ -587,7 +591,7 @@ def render_causal_controls(
     fig, axes = plt.subplots(
         len(presets),
         len(KEY_CONDITIONS),
-        figsize=(9.2, 5.2),
+        figsize=(9.2, 2.35 * len(presets) + 0.55),
         constrained_layout=True,
         squeeze=False,
         sharex=True,
@@ -1086,8 +1090,8 @@ def self_test(
 def main() -> None:
     args = parse_args()
     presets = tuple(args.presets) if args.presets else PRESETS
-    if len(presets) != 2 or len(set(presets)) != len(presets):
-        raise ValueError("--preset must select exactly two distinct presets")
+    if len(presets) != len(set(presets)):
+        raise ValueError("--preset values must be distinct")
     _suite_for(presets)
     if args.self_test:
         self_test(args.self_test_output, presets)
