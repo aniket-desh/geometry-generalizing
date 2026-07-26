@@ -4,6 +4,8 @@ This directory contains the reproducible experiment harness for blog post VI.
 It compares ordinary empirical HOPE with a centered-unembedding-weighted
 variant on the final MLP of GPT-2 and Pythia models.
 
+The audited nine-model run is summarized in [RESULTS.md](RESULTS.md).
+
 The expensive run is designed around a cached final-layer intervention. Each
 model is passed over the calibration and evaluation corpora once. Later
 ablations subtract \(a_i(x)v_i\) from the cached pre-normalization residual and
