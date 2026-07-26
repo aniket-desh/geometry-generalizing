@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -310,6 +311,12 @@ def run() -> None:
     run_name = f"{task.name}-{args.preset}-s{args.seed}-{digest}"
     run_dir = args.output_root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
+    lock_handle = (run_dir / ".run.lock").open("a+")
+    try:
+        fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"{run_name}: waiting for another launcher", flush=True)
+        fcntl.flock(lock_handle, fcntl.LOCK_EX)
     done_path = run_dir / "done.json"
     if done_path.exists():
         completed = json.loads(done_path.read_text())
