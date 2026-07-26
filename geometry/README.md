@@ -115,6 +115,31 @@ geometry/launch_priority_tmux.sh
 `launch_key60_tmux.sh` remains the older uniform-60k protocol; it should not be
 run alongside the mixed-horizon launcher against the same result root.
 
+After a core or scale suite and its endpoint analyses complete,
+`summarize_priority_evidence.py` performs a stricter, renderer-independent
+audit and writes both JSON and Markdown. It rejects any matrix other than the
+exact 18 identities and mixed horizons, verifies the preregistered successor
+vector and hash in every operator and causal output, and reports each seed's
+first measured 90% crossing, peak and final held-out accuracy, post-peak
+drawdown, canonical-label agreement on its exact held-out split, inductive
+operator error and alias-held-out code gain, and causal success at node 0 and
+output final with matched control maxima.
+
+```bash
+python geometry/summarize_priority_evidence.py \
+  --results-root /path/to/core-results \
+  --suite core \
+  --output-json /path/to/core-evidence.json \
+  --output-markdown /path/to/core-evidence.md
+
+python geometry/summarize_priority_evidence.py --self-test
+```
+
+Analysis JSON and sidecars normally live inside each run directory. If they
+were downloaded separately, pass `--analysis-root`; it must contain one
+subdirectory per run, named either by the training `run_name` or by the stable
+`condition-preset-seed` slug.
+
 An optional matched-capacity phase adds the same three seeds and three
 conditions for `small` (256×4) and `medium` (512×6) models. Clean runs reach
 60k; 15%-corrupted and random controls end at 30k, for exactly 18 additional
