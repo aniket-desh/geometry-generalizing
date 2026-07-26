@@ -23,7 +23,9 @@ There are three complementary protocols:
 2. `hmm_train.py` emits sequences from a latent relational system through many
    arbitrary surface aliases. It holds out state-action pairs, so the model must
    infer both which aliases name the same latent state and how the shared action
-   moves between states.
+   moves between states. The main sweep predicts the canonical latent state;
+   the harder `--target-mode alias` control also asks it to distribute
+   probability over an unpredictable output alias.
 3. `pythia_geometry.py` samples real Pythia pretraining checkpoints and tracks
    natural cyclic domains such as weekdays, months, seasons, compass directions,
    clock hours, and digits.

@@ -114,6 +114,8 @@ def run_one(
         str(run.aliases),
         "--eval-aliases",
         str(run.aliases),
+        "--target-mode",
+        "state",
         "--eval-every",
         str(run.eval_every),
         "--snapshot-every",

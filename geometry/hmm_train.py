@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1.0)
     parser.add_argument("--aliases", type=int, default=16)
     parser.add_argument("--eval-aliases", type=int, default=16)
+    parser.add_argument(
+        "--target-mode",
+        choices=("state", "alias"),
+        default="state",
+    )
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--snapshot-every", type=int, default=500)
     parser.add_argument("--checkpoint-every", type=int, default=10_000)
@@ -103,15 +108,24 @@ def make_pair_split(
 
 
 class HMMTokenLayout:
-    def __init__(self, states: int, aliases: int, actions: int) -> None:
+    def __init__(
+        self,
+        states: int,
+        aliases: int,
+        actions: int,
+        target_mode: str,
+    ) -> None:
         self.states = states
         self.aliases = aliases
         self.actions = actions
+        self.target_mode = target_mode
         self.bos = 0
         self.emission_base = 1
         self.action_base = self.emission_base + states * aliases
         self.vocab_size = self.action_base + actions
-        self.output_classes = states * aliases
+        self.output_classes = (
+            states if target_mode == "state" else states * aliases
+        )
 
     def emission(self, state: torch.Tensor, alias: torch.Tensor) -> torch.Tensor:
         return self.emission_base + alias * self.states + state
@@ -120,6 +134,8 @@ class HMMTokenLayout:
         return self.action_base + action
 
     def output(self, state: torch.Tensor, alias: torch.Tensor) -> torch.Tensor:
+        if self.target_mode == "state":
+            return state
         return alias * self.states + state
 
 
@@ -237,9 +253,12 @@ def evaluate(
         device=device,
     )
     logits, states = model(tokens, return_states=True)
-    state_logits = torch.logsumexp(
-        logits.view(-1, layout.aliases, layout.states), dim=1
-    )
+    if layout.target_mode == "state":
+        state_logits = logits
+    else:
+        state_logits = torch.logsumexp(
+            logits.view(-1, layout.aliases, layout.states), dim=1
+        )
     state_log_probs = state_logits - torch.logsumexp(
         state_logits, dim=-1, keepdim=True
     )
@@ -250,18 +269,21 @@ def evaluate(
         torch.arange(target_state.shape[0], device=device), target_state
     ]
 
-    emission_logits = logits.view(-1, layout.aliases, layout.states)
-    target_alias_logits = emission_logits.gather(
-        2,
-        target_state[:, None, None].expand(-1, layout.aliases, 1),
-    ).squeeze(2)
-    target_alias_log_probs = target_alias_logits - torch.logsumexp(
-        target_alias_logits, dim=1, keepdim=True
-    )
-    uniform_alias_kl = (
-        -math.log(layout.aliases)
-        - target_alias_log_probs.mean(dim=1)
-    )
+    if layout.target_mode == "state":
+        uniform_alias_kl = torch.full_like(nll, float("nan"))
+    else:
+        emission_logits = logits.view(-1, layout.aliases, layout.states)
+        target_alias_logits = emission_logits.gather(
+            2,
+            target_state[:, None, None].expand(-1, layout.aliases, 1),
+        ).squeeze(2)
+        target_alias_log_probs = target_alias_logits - torch.logsumexp(
+            target_alias_logits, dim=1, keepdim=True
+        )
+        uniform_alias_kl = (
+            -math.log(layout.aliases)
+            - target_alias_log_probs.mean(dim=1)
+        )
     behavior = {
         "train_accuracy": float(correct[pair_is_train].float().mean()),
         "test_accuracy": float(correct[~pair_is_train].float().mean()),
@@ -380,6 +402,7 @@ def run() -> None:
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "aliases": args.aliases,
+        "target_mode": args.target_mode,
     }
     digest = hashlib.sha1(
         json.dumps(run_payload, sort_keys=True).encode()
@@ -399,7 +422,10 @@ def run() -> None:
     )
     train_mask = torch.as_tensor(train_mask_np, device=device)
     layout = HMMTokenLayout(
-        task.order, args.aliases, len(relations_np)
+        task.order,
+        args.aliases,
+        len(relations_np),
+        args.target_mode,
     )
     config: ModelConfig = PRESETS[args.preset]
     raw_model = GeometryTransformer(
