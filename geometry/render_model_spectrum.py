@@ -595,9 +595,16 @@ def _data_payload(
     }
 
 
-def _save_figure(fig: plt.Figure, output: Path, caption: str) -> list[Path]:
+def _save_figure(
+    fig: plt.Figure,
+    output: Path,
+    caption: str,
+    *,
+    stem: str,
+    title: str,
+) -> list[Path]:
     output.mkdir(parents=True, exist_ok=True)
-    base = output / "model-spectrum"
+    base = output / stem
     png = base.with_suffix(".png")
     pdf = base.with_suffix(".pdf")
     fig.savefig(
@@ -607,7 +614,7 @@ def _save_figure(fig: plt.Figure, output: Path, caption: str) -> list[Path]:
         bbox_inches="tight",
         pad_inches=0.04,
         metadata={
-            "Title": "Five-model corrupted endpoint spectrum",
+            "Title": title,
             "Description": caption,
             "Software": "geometry/render_model_spectrum.py",
         },
@@ -618,7 +625,7 @@ def _save_figure(fig: plt.Figure, output: Path, caption: str) -> list[Path]:
         bbox_inches="tight",
         pad_inches=0.04,
         metadata={
-            "Title": "Five-model corrupted endpoint spectrum",
+            "Title": title,
             "Subject": caption,
             "Keywords": (
                 "activation geometry; matched seeds; pointwise median; "
@@ -634,6 +641,8 @@ def _save_figure(fig: plt.Figure, output: Path, caption: str) -> list[Path]:
 def _render_figure(
     rows: list[dict[str, object]],
     output: Path,
+    *,
+    mobile: bool,
 ) -> list[Path]:
     specs = (
         ("held-out accuracy", "accuracy", "held_out_accuracy"),
@@ -649,16 +658,17 @@ def _render_figure(
         ),
     )
     x = np.arange(len(MODEL_SPECS), dtype=float)
+    panel_rows, panel_columns = ((3, 1) if mobile else (1, len(specs)))
     fig, axes = plt.subplots(
-        1,
-        len(specs),
-        figsize=(10.2, 3.35),
+        panel_rows,
+        panel_columns,
+        figsize=((3.9, 7.6) if mobile else (10.2, 3.35)),
         constrained_layout=True,
         squeeze=False,
     )
     fig.patch.set_alpha(0)
     for column, (title, ylabel, key) in enumerate(specs):
-        axis = axes[0, column]
+        axis = axes[column, 0] if mobile else axes[0, column]
         by_seed, median = _series(rows, key)
         for seed in SEEDS:
             values = by_seed[seed]
@@ -716,21 +726,22 @@ def _render_figure(
         )
     )
     chance = 1.0 / TASK_ORDER
-    axes[0, 0].axhline(
+    behavior_axis = axes[0, 0]
+    behavior_axis.axhline(
         ceiling,
         color=NORD["muted"],
         alpha=0.6,
         linewidth=0.9,
         linestyle=(0, (4, 3)),
     )
-    axes[0, 0].axhline(
+    behavior_axis.axhline(
         chance,
         color=NORD["muted"],
         alpha=0.45,
         linewidth=0.8,
         linestyle=(0, (1, 2)),
     )
-    axes[0, 0].legend(
+    behavior_axis.legend(
         handles=[
             Line2D(
                 [0],
@@ -781,7 +792,19 @@ def _render_figure(
         ncol=2,
         frameon=False,
     )
-    return _save_figure(fig, output, _caption())
+    stem = "model-spectrum-mobile" if mobile else "model-spectrum"
+    title = (
+        "Five-model corrupted endpoint spectrum, portrait layout"
+        if mobile
+        else "Five-model corrupted endpoint spectrum"
+    )
+    return _save_figure(
+        fig,
+        output,
+        _caption(),
+        stem=stem,
+        title=title,
+    )
 
 
 def render(
@@ -799,7 +822,10 @@ def render(
     summaries = validate_suites(roots)
     rows = _corrupted_rows(summaries)
     data = _data_payload(rows, summaries)
-    artifacts = _render_figure(rows, output)
+    artifacts = [
+        *_render_figure(rows, output, mobile=False),
+        *_render_figure(rows, output, mobile=True),
+    ]
     data_path = output / "model-spectrum-data.json"
     caption_path = output / "model-spectrum-caption.txt"
     _atomic_json(data_path, data)
@@ -823,6 +849,18 @@ def render(
         },
         "causal_metric": CAUSAL_POLICY,
         "render_policy": data["render_policy"],
+        "layouts": {
+            "desktop": {
+                "stem": "model-spectrum",
+                "panels": "1x3",
+                "data": "the same 15 validated endpoint rows",
+            },
+            "mobile": {
+                "stem": "model-spectrum-mobile",
+                "panels": "3x1",
+                "data": "the same 15 validated endpoint rows",
+            },
+        },
         "references": data["references"],
         "input_provenance": data["provenance"],
         "artifacts": [
@@ -898,6 +936,8 @@ def self_test(output: Path | None = None) -> None:
     expected = {
         "model-spectrum.png",
         "model-spectrum.pdf",
+        "model-spectrum-mobile.png",
+        "model-spectrum-mobile.pdf",
         "model-spectrum-data.json",
         "model-spectrum-caption.txt",
         "model-spectrum-manifest.json",
@@ -1014,6 +1054,15 @@ def self_test(output: Path | None = None) -> None:
             or "same seed" not in image.info.get("Description", "")
         ):
             raise AssertionError("model-spectrum PNG failed visual metadata checks")
+    with Image.open(figures / "model-spectrum-mobile.png") as image:
+        if (
+            image.getbbox() is None
+            or image.height <= 1.6 * image.width
+            or "same seed" not in image.info.get("Description", "")
+        ):
+            raise AssertionError(
+                "model-spectrum mobile PNG failed portrait or metadata checks"
+            )
     print(f"self-test passed: {figures}")
     if context is not None:
         context.cleanup()

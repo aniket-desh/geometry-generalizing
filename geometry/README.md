@@ -47,7 +47,9 @@ combines it with seeds 1 and 2 from the replication result root, and rejects
 anything other than the exact 4-task × 3-seed matrix. It also verifies the
 semantic protocol hash, every explicit seed field, and each operation table
 against its seeded task generator. The figure shows faint measured runs and a
-bold pointwise median only where all three seeds have an observed checkpoint:
+bold pointwise median only where all three seeds have an observed checkpoint.
+It writes a 2-by-2 desktop figure and a scientifically identical 4-by-1
+`-mobile` figure from the same validated records:
 
 ```bash
 python geometry/render_breadth_replication.py \
@@ -271,6 +273,8 @@ figure. The presets change width and depth together, and use batch sizes 4096,
 than an isolated capacity scaling law. Causal folds use qualified accuracy when
 at least 64 examples qualify and bounded absolute accuracy otherwise; the output
 records each fold's metric key because those populations are not homogeneous.
+The renderer writes both a 1-by-3 desktop figure and a scientifically identical
+3-by-1 `model-spectrum-mobile` figure from the same endpoint matrix.
 
 ```bash
 python geometry/render_model_spectrum.py \

@@ -467,24 +467,39 @@ def first_crossing(run: Run, threshold: float = 0.9) -> int | None:
     )
 
 
-def render(runs: list[Run], output: Path) -> dict[str, object]:
-    by_task = {
-        task: [run for run in runs if run.task == task]
-        for task in TASKS
-    }
-    if any([run.seed for run in task_runs] != list(SEEDS) for task_runs in by_task.values()):
-        raise EvidenceError("rendering requires ordered seeds 0, 1, and 2 per task")
-    output.mkdir(parents=True, exist_ok=True)
-    fig, axes = plt.subplots(2, 2, figsize=(7.8, 4.25), sharex=True, sharey=True)
-    fig.patch.set_alpha(0)
-    fig.subplots_adjust(
-        left=0.085,
-        right=0.995,
-        top=0.97,
-        bottom=0.22,
-        hspace=0.30,
-        wspace=0.15,
+def render_trajectory_layout(
+    by_task: dict[str, list[Run]],
+    output: Path,
+    *,
+    mobile: bool,
+) -> list[Path]:
+    panel_rows, panel_columns = ((len(TASKS), 1) if mobile else (2, 2))
+    fig, axes = plt.subplots(
+        panel_rows,
+        panel_columns,
+        figsize=((3.9, 7.8) if mobile else (7.8, 4.25)),
+        sharex=True,
+        sharey=True,
+        squeeze=False,
     )
+    fig.patch.set_alpha(0)
+    if mobile:
+        fig.subplots_adjust(
+            left=0.18,
+            right=0.99,
+            top=0.985,
+            bottom=0.15,
+            hspace=0.28,
+        )
+    else:
+        fig.subplots_adjust(
+            left=0.085,
+            right=0.995,
+            top=0.97,
+            bottom=0.22,
+            hspace=0.30,
+            wspace=0.15,
+        )
     for index, (axis, task) in enumerate(zip(axes.flat, TASKS)):
         color = TASK_COLORS[task]
         task_runs = by_task[task]
@@ -521,16 +536,27 @@ def render(runs: list[Run], output: Path) -> dict[str, object]:
         axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
         _step_axis(axis)
         _style_axis(axis)
-        row, column = divmod(index, 2)
-        if column:
-            axis.tick_params(left=False, labelleft=False)
-            axis.spines["left"].set_visible(False)
-        if row == 0:
-            axis.tick_params(bottom=False, labelbottom=False)
-            axis.spines["bottom"].set_visible(False)
-    fig.text(0.54, 0.09, "step", ha="center", va="bottom")
+        if mobile:
+            if index < len(TASKS) - 1:
+                axis.tick_params(bottom=False, labelbottom=False)
+                axis.spines["bottom"].set_visible(False)
+        else:
+            row, column = divmod(index, 2)
+            if column:
+                axis.tick_params(left=False, labelleft=False)
+                axis.spines["left"].set_visible(False)
+            if row == 0:
+                axis.tick_params(bottom=False, labelbottom=False)
+                axis.spines["bottom"].set_visible(False)
     fig.text(
-        0.015,
+        0.54,
+        0.075 if mobile else 0.09,
+        "step",
+        ha="center",
+        va="bottom",
+    )
+    fig.text(
+        0.025 if mobile else 0.015,
         0.56,
         "held-out accuracy",
         ha="left",
@@ -563,7 +589,29 @@ def render(runs: list[Run], output: Path) -> dict[str, object]:
         handlelength=2.0,
         columnspacing=1.5,
     )
-    artifacts = _save_static(fig, output / "breadth-replication-trajectories")
+    stem = (
+        "breadth-replication-trajectories-mobile"
+        if mobile
+        else "breadth-replication-trajectories"
+    )
+    return _save_static(fig, output / stem)
+
+
+def render(runs: list[Run], output: Path) -> dict[str, object]:
+    by_task = {
+        task: [run for run in runs if run.task == task]
+        for task in TASKS
+    }
+    if any(
+        [run.seed for run in task_runs] != list(SEEDS)
+        for task_runs in by_task.values()
+    ):
+        raise EvidenceError("rendering requires ordered seeds 0, 1, and 2 per task")
+    output.mkdir(parents=True, exist_ok=True)
+    artifacts = [
+        *render_trajectory_layout(by_task, output, mobile=False),
+        *render_trajectory_layout(by_task, output, mobile=True),
+    ]
     protocol_hash = canonical_sha256(SEMANTIC_PROTOCOL)
     task_summaries = {}
     for task, task_runs in by_task.items():
@@ -616,6 +664,18 @@ def render(runs: list[Run], output: Path) -> dict[str, object]:
             "faint measured seed trajectories plus the pointwise median at "
             "steps measured in all three seeds"
         ),
+        "layouts": {
+            "desktop": {
+                "stem": "breadth-replication-trajectories",
+                "panels": "2x2",
+                "data": "the same 12 validated runs",
+            },
+            "mobile": {
+                "stem": "breadth-replication-trajectories-mobile",
+                "panels": "4x1",
+                "data": "the same 12 validated runs",
+            },
+        },
         "checkpoint_rendering": "measured records only; no interpolation, smoothing, confidence interval, or extrapolation",
         "runs": [
             {
@@ -724,13 +784,30 @@ def run_self_test(destination: Path | None) -> None:
     expected = {
         "breadth-replication-trajectories.png",
         "breadth-replication-trajectories.pdf",
+        "breadth-replication-trajectories-mobile.png",
+        "breadth-replication-trajectories-mobile.pdf",
         "breadth-replication-summary.json",
         "breadth-replication-render-manifest.json",
         "breadth-replication-render-done.json",
     }
     missing = sorted(name for name in expected if not (output / name).is_file())
-    if missing or manifest["matrix"]["run_count"] != 12:
+    artifact_names = {
+        Path(path).name for path in manifest.get("artifacts", ())
+    }
+    if (
+        missing
+        or artifact_names != expected
+        or manifest["matrix"]["run_count"] != 12
+        or manifest.get("layouts", {}).get("mobile", {}).get("panels") != "4x1"
+    ):
         raise AssertionError(f"breadth replication self-test failed: {missing}")
+    from PIL import Image
+
+    with Image.open(
+        output / "breadth-replication-trajectories-mobile.png"
+    ) as image:
+        if image.getbbox() is None or image.height <= 1.6 * image.width:
+            raise AssertionError("breadth mobile figure is not a portrait render")
     tampered = next(replication.glob("torus5-micro-s1-*/config.json"))
     config = json.loads(tampered.read_text())
     config["weight_decay"] = 0.0
