@@ -29,9 +29,10 @@ There are three complementary protocols:
    clock hours, and digits.
 
 `summarize.py` aggregates controlled runs, `posthoc_layers.py` reconstructs
-layerwise full-space metrics from saved snapshots, and `summarize_pythia.py`
-extracts the best layerwise geometry and behavior from every natural-domain
-checkpoint.
+layerwise full-space metrics from saved snapshots, `derive_trajectory.py`
+computes the lightweight compression traces used in the main spaghetti plot,
+and `summarize_pythia.py` extracts the best layerwise geometry and behavior from
+every natural-domain checkpoint.
 
 PCA is saved only for illustration. It is not evidence that a manifold exists.
 

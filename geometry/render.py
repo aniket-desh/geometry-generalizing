@@ -11,6 +11,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FFMpegWriter, FuncAnimation
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 
 
 NORD = {
@@ -51,7 +52,12 @@ def load_series(
         config = json.loads(config_path.read_text())
         if config["task"] != task or config["preset"] != preset:
             continue
-        metrics_path = config_path.parent / "metrics.jsonl"
+        trajectory_path = config_path.parent / "trajectory.jsonl"
+        metrics_path = (
+            trajectory_path
+            if trajectory_path.exists()
+            else config_path.parent / "metrics.jsonl"
+        )
         if metrics_path.exists():
             records = [
                 json.loads(line)
@@ -70,8 +76,8 @@ def render_spaghetti(
         raise ValueError("no matching runs")
     metrics = (
         ("test_accuracy", "held-out accuracy", NORD["blue"]),
-        ("node_geometry.cyclic_defect", "cyclic defect", NORD["red"]),
-        ("node_geometry.generator_error", "shift error", NORD["green"]),
+        ("cyclic_defect", "cyclic defect", NORD["red"]),
+        ("fourier_mode_rank", "Fourier modes", NORD["green"]),
     )
     fig, axes = plt.subplots(1, 3, figsize=(10.2, 2.8), constrained_layout=True)
     fig.patch.set_alpha(0)
@@ -99,6 +105,16 @@ def render_spaghetti(
         axis.plot(steps, medians, color=color, linewidth=2.2, label="median")
         axis.set_xlabel("step")
         axis.set_ylabel(label)
+        axis.xaxis.set_major_locator(MaxNLocator(4, integer=True))
+        axis.xaxis.set_major_formatter(
+            FuncFormatter(
+                lambda value, _: (
+                    f"{value / 1000:g}k"
+                    if abs(value) >= 1000
+                    else f"{value:g}"
+                )
+            )
+        )
         axis.spines[["top", "right"]].set_visible(False)
         axis.spines[["left", "bottom"]].set_color(NORD["muted"])
         axis.tick_params(colors=NORD["muted"], labelsize=8)
