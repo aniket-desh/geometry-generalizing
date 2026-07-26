@@ -55,16 +55,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--confirmation-manifest",
         type=Path,
-        default=Path(
-            "/workspace/geometry-reuse-logs/confirmation/manifest.json"
-        ),
+        default=Path("/workspace/geometry-reuse-logs/confirmation/manifest.json"),
     )
     parser.add_argument(
         "--confirmation-results",
         type=Path,
-        default=Path(
-            "/workspace/geometry-reuse-logs/confirmation/results.json"
-        ),
+        default=Path("/workspace/geometry-reuse-logs/confirmation/results.json"),
     )
     parser.add_argument(
         "--log-root",
@@ -292,9 +288,7 @@ def wait_for_confirmation(args: argparse.Namespace) -> list[Run]:
             expected_count=len(specs),
             final_step=args.final_step,
         ):
-            runs = discover_runs(
-                args.results_root, specs, final_step=args.final_step
-            )
+            runs = discover_runs(args.results_root, specs, final_step=args.final_step)
         if runs is not None:
             return runs
         if time.monotonic() - last_message >= 300.0:
@@ -565,6 +559,7 @@ def main() -> None:
         "output",
         "--operator-layer",
         "last",
+        "--require-complete-panels",
     ]
     for run in runs:
         render_command.extend(["--results", str(run.path)])

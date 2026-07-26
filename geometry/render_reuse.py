@@ -4,7 +4,6 @@ import argparse
 import csv
 import json
 import math
-import subprocess
 import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -17,8 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.font_manager as font_manager
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
-from matplotlib.collections import LineCollection
+from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, MaxNLocator, PercentFormatter
@@ -160,12 +158,18 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Run directory/name substring, auto, or none.",
     )
-    parser.add_argument(
-        "--animation-view", choices=("node", "output"), default="node"
-    )
+    parser.add_argument("--animation-view", choices=("node", "output"), default="node")
     parser.add_argument("--animation-layer", default="last")
     parser.add_argument("--max-animation-frames", type=int, default=180)
     parser.add_argument("--fps", type=int, default=12)
+    parser.add_argument(
+        "--require-complete-panels",
+        action="store_true",
+        help=(
+            "Fail unless every selected run has behavioral, operator-geometry, "
+            "explicit usable-MDL, and learned-generator causal measurements."
+        ),
+    )
     parser.add_argument(
         "--self-test",
         action="store_true",
@@ -332,9 +336,7 @@ def _layer_value(layer: str, records: list[dict[str, object]]) -> int:
     return available[-1] if layer == "last" else int(layer)
 
 
-def select_operator(
-    run: RunData, *, view: str, layer: str
-) -> list[dict[str, object]]:
+def select_operator(run: RunData, *, view: str, layer: str) -> list[dict[str, object]]:
     candidates = [
         record
         for record in run.operator
@@ -426,7 +428,9 @@ def _save_static(fig: plt.Figure, base: Path) -> list[Path]:
     return [png, pdf]
 
 
-def _median_curve(curves: Iterable[tuple[np.ndarray, np.ndarray]]) -> tuple[np.ndarray, np.ndarray]:
+def _median_curve(
+    curves: Iterable[tuple[np.ndarray, np.ndarray]]
+) -> tuple[np.ndarray, np.ndarray]:
     values: dict[float, list[float]] = defaultdict(list)
     for xs, ys in curves:
         for x, y in zip(xs, ys):
@@ -491,9 +495,7 @@ def _causal_curve(
     run: RunData, *, position: str, layer: str
 ) -> tuple[np.ndarray, np.ndarray]:
     by_step: dict[int, list[float]] = defaultdict(list)
-    for record in select_causal(
-        run, position=position, layer=layer, final_only=False
-    ):
+    for record in select_causal(run, position=position, layer=layer, final_only=False):
         if str(record.get("control")) != "learned_generator":
             continue
         value = None
@@ -514,6 +516,66 @@ def _causal_curve(
     return xs, ys
 
 
+def primary_panel_evidence(
+    runs: list[RunData],
+    *,
+    operator_view: str,
+    operator_layer: str,
+    causal_position: str,
+    causal_layer: str,
+) -> dict[str, list[str]]:
+    evidence = {
+        "behavior": [],
+        "geometry": [],
+        "usable_mdl": [],
+        "causal": [],
+    }
+    for run in runs:
+        behavior_x, _ = _metric_curve(
+            run,
+            "test_accuracy",
+            operator_view=operator_view,
+            operator_layer=operator_layer,
+        )
+        geometry_x, _ = _metric_curve(
+            run,
+            "joint_cv_error",
+            operator_view=operator_view,
+            operator_layer=operator_layer,
+        )
+        causal_x, _ = _causal_curve(run, position=causal_position, layer=causal_layer)
+        operator = select_operator(run, view=operator_view, layer=operator_layer)
+        if behavior_x.size:
+            evidence["behavior"].append(run.name)
+        if geometry_x.size:
+            evidence["geometry"].append(run.name)
+        if any(
+            _finite(record.get("usable_reuse_gain_bits")) is not None
+            for record in operator
+        ):
+            evidence["usable_mdl"].append(run.name)
+        if causal_x.size:
+            evidence["causal"].append(run.name)
+    return evidence
+
+
+def require_primary_panels(
+    runs: list[RunData],
+    evidence: dict[str, list[str]],
+) -> None:
+    expected = {run.name for run in runs}
+    missing = {
+        panel: sorted(expected - set(observed))
+        for panel, observed in evidence.items()
+        if set(observed) != expected
+    }
+    if missing:
+        details = "; ".join(
+            f"{panel}: {', '.join(names)}" for panel, names in missing.items()
+        )
+        raise ValueError(f"incomplete primary-panel evidence; {details}")
+
+
 def render_spaghetti(
     runs: list[RunData],
     *,
@@ -526,18 +588,34 @@ def render_spaghetti(
     specs: list[tuple[str, str, str]] = [
         ("test_accuracy", "held-out accuracy", NORD["frost_dark"]),
     ]
-    if any(run.operator for run in runs):
-        specs.extend(
-            [
-                ("joint_cv_error", "generator error", NORD["red"]),
-                (
-                    "usable_reuse_gain_bits",
-                    "usable shared-rule gain (kbit)",
-                    NORD["green"],
-                ),
-            ]
+    if any(
+        _metric_curve(
+            run,
+            "joint_cv_error",
+            operator_view=operator_view,
+            operator_layer=operator_layer,
+        )[0].size
+        for run in runs
+    ):
+        specs.append(("joint_cv_error", "generator error", NORD["red"]))
+    if any(
+        any(
+            _finite(record.get("usable_reuse_gain_bits")) is not None
+            for record in select_operator(run, view=operator_view, layer=operator_layer)
         )
-    if any(run.causal for run in runs):
+        for run in runs
+    ):
+        specs.append(
+            (
+                "usable_reuse_gain_bits",
+                "usable shared-rule gain (kbit)",
+                NORD["green"],
+            )
+        )
+    if any(
+        _causal_curve(run, position=causal_position, layer=causal_layer)[0].size
+        for run in runs
+    ):
         specs.append(
             (
                 "causal_shift_success",
@@ -575,9 +653,27 @@ def render_spaghetti(
             if xs.size:
                 curves.append((xs, ys))
                 axis.plot(xs, ys, color=color, alpha=0.16, linewidth=0.85)
+                if xs.size == 1:
+                    axis.scatter(
+                        xs,
+                        ys,
+                        color=color,
+                        alpha=0.16,
+                        s=10,
+                        linewidths=0,
+                    )
         median_x, median_y = _median_curve(curves)
         if median_x.size:
             axis.plot(median_x, median_y, color=color, linewidth=2.5)
+            if median_x.size == 1:
+                axis.scatter(
+                    median_x,
+                    median_y,
+                    color=color,
+                    s=22,
+                    linewidths=0,
+                    zorder=3,
+                )
         axis.set_xlabel("step")
         axis.set_ylabel(label)
         _step_axis(axis)
@@ -628,9 +724,7 @@ def render_generalization_reuse(
     curves: list[list[tuple[float, float, float, int]]] = []
     for run in runs:
         points = []
-        for record in select_operator(
-            run, view=operator_view, layer=operator_layer
-        ):
+        for record in select_operator(run, view=operator_view, layer=operator_layer):
             step = int(record["step"])
             accuracy = _accuracy_at(run, step, record)
             error = _finite(record.get("joint_cv_error"))
@@ -690,18 +784,14 @@ def render_generalization_reuse(
 
 
 def _final_behavior(run: RunData, key: str) -> float | None:
-    records = [
-        record for record in run.metrics if _finite(record.get(key)) is not None
-    ]
+    records = [record for record in run.metrics if _finite(record.get(key)) is not None]
     if not records:
         return None
     record = max(records, key=lambda item: int(item["step"]))
     return _finite(record.get(key))
 
 
-def _final_operator(
-    run: RunData, key: str, *, view: str, layer: str
-) -> float | None:
+def _final_operator(run: RunData, key: str, *, view: str, layer: str) -> float | None:
     records = select_operator(run, view=view, layer=layer)
     if not records:
         return None
@@ -725,9 +815,7 @@ def _final_operator(
     return value
 
 
-def _final_causal(
-    run: RunData, *, position: str, layer: str
-) -> float | None:
+def _final_causal(run: RunData, *, position: str, layer: str) -> float | None:
     values = []
     for record in select_causal(run, position=position, layer=layer):
         if str(record.get("control")) != "learned_generator":
@@ -912,10 +1000,7 @@ def render_condition_summary(
     causal_conditions = {
         _condition_key(run)
         for run in runs
-        if _final_causal(
-            run, position=causal_position, layer=causal_layer
-        )
-        is not None
+        if _final_causal(run, position=causal_position, layer=causal_layer) is not None
     }
     if len(causal_conditions) >= 2:
         specs.append(
@@ -1106,9 +1191,7 @@ def _choose_animation_run(
             ):
                 return run
         raise ValueError(f"no run matches --animate-run {request!r}")
-    candidates = matching_runs(
-        runs, task=task, preset=preset, condition="clean"
-    )
+    candidates = matching_runs(runs, task=task, preset=preset, condition="clean")
     candidates = [run for run in candidates if len(run.activation_paths) >= 2]
     if not candidates:
         return None
@@ -1159,9 +1242,7 @@ def _animation_frames(
 ) -> tuple[list[np.ndarray], list[int]]:
     paths = run.activation_paths
     if max_frames > 0 and len(paths) > max_frames:
-        indices = np.unique(
-            np.linspace(0, len(paths) - 1, max_frames, dtype=int)
-        )
+        indices = np.unique(np.linspace(0, len(paths) - 1, max_frames, dtype=int))
         paths = [paths[index] for index in indices]
     depth = int(
         (
@@ -1173,9 +1254,7 @@ def _animation_frames(
     loaded = []
     for path in paths:
         try:
-            frame = _activation_frame(
-                path, view=view, layer=layer, depth=depth
-            )
+            frame = _activation_frame(path, view=view, layer=layer, depth=depth)
         except (OSError, ValueError, KeyError):
             continue
         loaded.append((path, frame))
@@ -1197,30 +1276,13 @@ def _animation_frames(
         (frame - frame.mean(axis=(0, 1), keepdims=True)) @ basis for frame in raw
     ]
     scale = float(
-        np.quantile(np.abs(np.concatenate([frame.reshape(-1, 2) for frame in projected])), 0.995)
+        np.quantile(
+            np.abs(np.concatenate([frame.reshape(-1, 2) for frame in projected])), 0.995
+        )
     )
     projected = [frame / max(scale, 1e-12) for frame in projected]
     steps = [_step_from_path(path) for path in paths]
     return projected, steps
-
-
-def _successor(run: RunData, order: int) -> np.ndarray:
-    table_path = run.path / "operation_table.npy"
-    if table_path.exists():
-        table = np.load(table_path)
-        if table.shape[0] == order:
-            relation = 1 if table.shape[1] > 1 else 0
-            return np.asarray(table[:, relation], dtype=int)
-    return (np.arange(order) + 1) % order
-
-
-def _enable_bundled_ffmpeg() -> None:
-    try:
-        import imageio_ffmpeg
-
-        plt.rcParams["animation.ffmpeg_path"] = imageio_ffmpeg.get_ffmpeg_exe()
-    except (ImportError, RuntimeError):
-        pass
 
 
 def render_geometry_movie(
@@ -1236,7 +1298,6 @@ def render_geometry_movie(
         run, view=view, layer=layer, max_frames=max_frames
     )
     order, aliases = frames[-1].shape[:2]
-    successor = _successor(run, order)
     phase_map = LinearSegmentedColormap.from_list("nord-cycle", SERIES, N=order)
     state_colors = phase_map(np.linspace(0, 1, order, endpoint=False))
     point_colors = np.repeat(state_colors, aliases, axis=0)
@@ -1251,12 +1312,7 @@ def render_geometry_movie(
     axis.set_xticks([])
     axis.set_yticks([])
     axis.spines[:].set_visible(False)
-    edges = LineCollection([], colors=NORD["muted"], alpha=0.20, linewidths=0.65)
-    axis.add_collection(edges)
-    points = axis.scatter([], [], s=9, alpha=0.20, linewidths=0)
-    centroids = axis.scatter(
-        [], [], s=27, linewidths=0.35, edgecolors=NORD["ink"], zorder=3
-    )
+    points = axis.scatter([], [], s=11, alpha=0.28, linewidths=0)
     step_label = axis.text(
         0.02,
         0.98,
@@ -1269,16 +1325,10 @@ def render_geometry_movie(
 
     def update(index: int):
         frame = frames[index]
-        centers = frame.mean(axis=1)
-        edges.set_segments(
-            np.stack((centers, centers[successor]), axis=1)
-        )
         points.set_offsets(frame.reshape(-1, 2))
         points.set_color(point_colors)
-        centroids.set_offsets(centers)
-        centroids.set_color(state_colors)
         step_label.set_text(f"step {steps[index]:,}")
-        return edges, points, centroids, step_label
+        return points, step_label
 
     animation = FuncAnimation(
         fig,
@@ -1286,26 +1336,11 @@ def render_geometry_movie(
         frames=len(frames),
         interval=1000 / max(fps, 1),
         blit=True,
-        repeat=False,
+        repeat=True,
     )
     output.mkdir(parents=True, exist_ok=True)
-    _enable_bundled_ffmpeg()
-    movie_path = output / "geometry-orbit.mp4"
-    try:
-        animation.save(
-            movie_path,
-            writer=FFMpegWriter(
-                fps=fps,
-                codec="libx264",
-                bitrate=1900,
-                extra_args=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
-            ),
-            dpi=180,
-        )
-    except (FileNotFoundError, RuntimeError, subprocess.SubprocessError):
-        movie_path.unlink(missing_ok=True)
-        movie_path = output / "geometry-orbit.gif"
-        animation.save(movie_path, writer=PillowWriter(fps=fps), dpi=130)
+    movie_path = output / "geometry-orbit.gif"
+    animation.save(movie_path, writer=PillowWriter(fps=fps), dpi=130)
     update(len(frames) - 1)
     poster = _save_static(fig, output / "geometry-orbit-poster")
     return [movie_path, *poster]
@@ -1327,15 +1362,12 @@ def render_all(
     animation_layer: str,
     max_animation_frames: int,
     fps: int,
+    require_complete_panels: bool = False,
 ) -> dict[str, object]:
     runs = discover_runs(roots)
-    selected = matching_runs(
-        runs, task=task, preset=preset, condition=main_condition
-    )
+    selected = matching_runs(runs, task=task, preset=preset, condition=main_condition)
     exact_phase_runs = matching_runs(runs, task=task, preset=preset)
-    phase_orders = {
-        int(run.config.get("task_order", -1)) for run in exact_phase_runs
-    }
+    phase_orders = {int(run.config.get("task_order", -1)) for run in exact_phase_runs}
     phase_runs = [
         run
         for run in runs
@@ -1350,6 +1382,17 @@ def render_all(
         )
     ]
     output.mkdir(parents=True, exist_ok=True)
+    panel_evidence = primary_panel_evidence(
+        selected,
+        operator_view=operator_view,
+        operator_layer=operator_layer,
+        causal_position=causal_position,
+        causal_layer=causal_layer,
+    )
+    if require_complete_panels:
+        if not selected:
+            raise ValueError("no runs selected for required primary panels")
+        require_primary_panels(selected, panel_evidence)
     artifacts: list[Path] = []
     if selected:
         artifacts.extend(
@@ -1422,6 +1465,10 @@ def render_all(
         "main_condition": main_condition,
         "operator_slice": {"view": operator_view, "layer": operator_layer},
         "causal_slice": {"position": causal_position, "layer": causal_layer},
+        "primary_panel_evidence": panel_evidence,
+        "required_complete_panels": require_complete_panels,
+        "checkpoint_rendering": "measured records only; no smoothing or interpolation",
+        "multi_seed_summary": "faded individual runs with pointwise median",
         "animation_run": movie_run.name if movie_run is not None else None,
         "artifacts": [str(path) for path in artifacts],
     }
@@ -1475,9 +1522,7 @@ def _write_fixture(root: Path) -> None:
             metric_records = []
             operator_records = []
             threshold = (
-                80_000
-                if random_control
-                else 12_000 + 22_000 * corruption + seed * 800
+                80_000 if random_control else 12_000 + 22_000 * corruption + seed * 800
             )
             for step in steps:
                 accuracy = 1 / (1 + np.exp(-(step - threshold) / 2_700))
@@ -1544,9 +1589,7 @@ def _write_fixture(root: Path) -> None:
                 + "\n"
             )
             if random_control and seed == 0:
-                (run_dir / "operator_reuse-partial.json").write_text(
-                    '{"metadata":'
-                )
+                (run_dir / "operator_reuse-partial.json").write_text('{"metadata":')
             if clean:
                 causal_records = []
                 recoveries = {
@@ -1557,9 +1600,7 @@ def _write_fixture(root: Path) -> None:
                     "random_orthogonal": 0.02,
                 }
                 for step in steps:
-                    progress = 1 / (
-                        1 + np.exp(-(step - threshold) / 2_700)
-                    )
+                    progress = 1 / (1 + np.exp(-(step - threshold) / 2_700))
                     for fold in range(3):
                         for control, recovery in recoveries.items():
                             causal_records.append(
@@ -1570,12 +1611,10 @@ def _write_fixture(root: Path) -> None:
                                     "layer": 1,
                                     "control": control,
                                     "qualified_desired_accuracy": float(
-                                        recovery * progress
-                                        + 0.025 * rng.normal()
+                                        recovery * progress + 0.025 * rng.normal()
                                     ),
                                     "probability_recovery": float(
-                                        recovery * progress
-                                        + 0.025 * rng.normal()
+                                        recovery * progress + 0.025 * rng.normal()
                                     ),
                                 }
                             )
@@ -1591,17 +1630,21 @@ def _write_fixture(root: Path) -> None:
 
 
 def run_self_test(destination: Path | None) -> None:
-    if _preferred_reuse_gain(
-        {
-            "usable_reuse_gain_bits": 1.0,
-            "lookup_reuse_gain_bits": 2.0,
-            "reuse_gain_bits": 3.0,
-        }
-    ) != 1.0:
+    if (
+        _preferred_reuse_gain(
+            {
+                "usable_reuse_gain_bits": 1.0,
+                "lookup_reuse_gain_bits": 2.0,
+                "reuse_gain_bits": 3.0,
+            }
+        )
+        != 1.0
+    ):
         raise AssertionError("usable reuse gain was not preferred")
-    if _preferred_reuse_gain(
-        {"lookup_reuse_gain_bits": 2.0, "reuse_gain_bits": 3.0}
-    ) != 2.0:
+    if (
+        _preferred_reuse_gain({"lookup_reuse_gain_bits": 2.0, "reuse_gain_bits": 3.0})
+        != 2.0
+    ):
         raise AssertionError("lookup reuse gain fallback failed")
     if _preferred_reuse_gain({"reuse_gain_bits": 3.0}) != 3.0:
         raise AssertionError("legacy reuse gain fallback failed")
@@ -1630,6 +1673,7 @@ def run_self_test(destination: Path | None) -> None:
         animation_layer="last",
         max_animation_frames=8,
         fps=4,
+        require_complete_panels=True,
     )
     expected = {
         "training-spaghetti.png",
@@ -1682,6 +1726,7 @@ def main() -> None:
         animation_layer=args.animation_layer,
         max_animation_frames=args.max_animation_frames,
         fps=args.fps,
+        require_complete_panels=args.require_complete_panels,
     )
     print(
         f"wrote {len(manifest['artifacts'])} artifacts from "

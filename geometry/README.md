@@ -35,6 +35,11 @@ Pythia layer and projects every checkpoint through a phase decoder fitted only
 at the final checkpoint. It is a developmental illustration, while the
 full-space metrics remain the evidence.
 
+`render_breadth.py --wait` validates that the nine seed-0 breadth runs have all
+reached 60,000 steps before writing the behavior and geometry trajectories to
+`/workspace/geometry-breadth-figures`. Since this pilot has one seed per task,
+the figure shows each measured run directly and does not draw a median.
+
 `reproduce_engels_geometry.py` reruns the GPT-2 small layer-7 SAE feature
 clusters reported by Engels et al. on the Pile, retaining only the weekday and
 twentieth-century-year manifolds and rendering them in the visual style used by
