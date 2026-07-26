@@ -210,6 +210,77 @@ def _split_indices(
     return np.sort(order[:count]), np.sort(order[count:])
 
 
+def lookup_vs_shared_successor_code(
+    coordinates: np.ndarray,
+    *,
+    successor: np.ndarray,
+    alias_train: np.ndarray,
+    alias_test: np.ndarray,
+    precision: float,
+) -> dict[str, float]:
+    """Code one successor with a shared rotation or a state lookup table.
+
+    Both models see every state but only the training aliases. The shared model
+    pays for one orthogonal map. The lookup model pays for one displacement
+    vector per source state. Residuals are encoded on held-out aliases, so the
+    lookup cannot win merely by storing the observed activation pairs.
+    """
+
+    if not len(alias_train) or not len(alias_test):
+        return {
+            "shared_successor_error": float("nan"),
+            "lookup_error": float("nan"),
+            "shared_successor_bits": float("nan"),
+            "lookup_bits": float("nan"),
+            "lookup_reuse_gain_bits": float("nan"),
+        }
+    states = np.arange(coordinates.shape[0])
+    x_train, y_train = _cartesian_examples(
+        coordinates, successor, states, alias_train
+    )
+    x_test, y_test = _cartesian_examples(
+        coordinates, successor, states, alias_test
+    )
+
+    shared = orthogonal_fit(x_train, y_train)
+    shared_error, shared_sse, scalar_count = normalized_error(
+        x_test @ shared, y_test
+    )
+
+    displacement = (
+        coordinates[successor][:, alias_train]
+        - coordinates[:, alias_train]
+    ).mean(axis=1)
+    source_state, _ = np.meshgrid(states, alias_test, indexing="ij")
+    lookup_prediction = x_test + displacement[source_state.ravel()]
+    lookup_error, lookup_sse, _ = normalized_error(
+        lookup_prediction, y_test
+    )
+
+    dimension = coordinates.shape[-1]
+    shared_parameters = dimension * (dimension - 1) // 2
+    lookup_parameters = coordinates.shape[0] * dimension
+    shared_bits = bic_code_bits(
+        sse=shared_sse,
+        scalar_count=scalar_count,
+        parameter_count=shared_parameters,
+        precision=precision,
+    )
+    lookup_bits = bic_code_bits(
+        sse=lookup_sse,
+        scalar_count=scalar_count,
+        parameter_count=lookup_parameters,
+        precision=precision,
+    )
+    return {
+        "shared_successor_error": shared_error,
+        "lookup_error": lookup_error,
+        "shared_successor_bits": shared_bits,
+        "lookup_bits": lookup_bits,
+        "lookup_reuse_gain_bits": lookup_bits - shared_bits,
+    }
+
+
 def analyze_fold(
     coordinates: np.ndarray,
     *,
@@ -256,6 +327,13 @@ def analyze_fold(
             "state_cv_error": split_errors["state"],
             "alias_cv_error": split_errors["alias"],
             "joint_cv_error": float("nan"),
+            **lookup_vs_shared_successor_code(
+                coordinates,
+                successor=shift_maps[1],
+                alias_train=alias_train,
+                alias_test=alias_test,
+                precision=precision,
+            ),
         }
 
     generator_power_errors: dict[str, float] = {}
@@ -288,13 +366,13 @@ def analyze_fold(
 
     dimension = coordinates.shape[-1]
     orthogonal_parameters = dimension * (dimension - 1) // 2
-    generator_bits = bic_code_bits(
+    multi_power_generator_bits = bic_code_bits(
         sse=generator_sse,
         scalar_count=scalar_count,
         parameter_count=orthogonal_parameters,
         precision=precision,
     )
-    independent_bits = bic_code_bits(
+    multi_power_independent_bits = bic_code_bits(
         sse=independent_sse,
         scalar_count=scalar_count,
         parameter_count=len(powers) * orthogonal_parameters,
@@ -311,6 +389,13 @@ def analyze_fold(
         joint_test_aliases,
     )
     closure_empirical_error = normalized_error(x_closure @ closure, y_closure)[0]
+    lookup_code = lookup_vs_shared_successor_code(
+        coordinates,
+        successor=shift_maps[1],
+        alias_train=alias_train,
+        alias_test=alias_test,
+        precision=precision,
+    )
     return {
         "state_cv_error": split_errors["state"],
         "alias_cv_error": split_errors["alias"],
@@ -319,9 +404,15 @@ def analyze_fold(
         "independent_power_errors": independent_power_errors,
         "closure_matrix_error": closure_matrix_error,
         "closure_empirical_error": closure_empirical_error,
-        "generator_bits": generator_bits,
-        "independent_bits": independent_bits,
-        "reuse_gain_bits": independent_bits - generator_bits,
+        "multi_power_generator_bits": multi_power_generator_bits,
+        "multi_power_independent_bits": multi_power_independent_bits,
+        "multi_power_reuse_gain_bits": (
+            multi_power_independent_bits - multi_power_generator_bits
+        ),
+        **lookup_code,
+        # Transitional alias consumed by the current renderer. Unlike the old
+        # field, it now names the targeted lookup-versus-generator comparison.
+        "reuse_gain_bits": lookup_code["lookup_reuse_gain_bits"],
     }
 
 
@@ -383,8 +474,14 @@ def analyze_activation_layer(
         "joint_cv_error",
         "closure_matrix_error",
         "closure_empirical_error",
-        "generator_bits",
-        "independent_bits",
+        "shared_successor_error",
+        "lookup_error",
+        "shared_successor_bits",
+        "lookup_bits",
+        "lookup_reuse_gain_bits",
+        "multi_power_generator_bits",
+        "multi_power_independent_bits",
+        "multi_power_reuse_gain_bits",
         "reuse_gain_bits",
     )
     summary: dict[str, object] = {
@@ -417,8 +514,14 @@ def degenerate_summary(powers: list[int], reason: str) -> dict[str, object]:
         "joint_cv_error": None,
         "closure_matrix_error": None,
         "closure_empirical_error": None,
-        "generator_bits": None,
-        "independent_bits": None,
+        "shared_successor_error": None,
+        "lookup_error": None,
+        "shared_successor_bits": None,
+        "lookup_bits": None,
+        "lookup_reuse_gain_bits": None,
+        "multi_power_generator_bits": None,
+        "multi_power_independent_bits": None,
+        "multi_power_reuse_gain_bits": None,
         "reuse_gain_bits": None,
         "folds": [],
     }
@@ -625,15 +728,20 @@ def run_self_test() -> None:
         raise AssertionError(f"structured generator error is too large: {structured}")
     if float(structured["closure_empirical_error"]) >= 0.01:
         raise AssertionError(f"structured closure error is too large: {structured}")
-    if float(structured["reuse_gain_bits"]) <= 0.0:
-        raise AssertionError(f"structured reuse gain is not positive: {structured}")
+    if float(structured["lookup_reuse_gain_bits"]) <= 0.0:
+        raise AssertionError(f"ring lookup reuse gain is not positive: {structured}")
+    if float(control["lookup_reuse_gain_bits"]) >= 0.0:
+        raise AssertionError(
+            f"scrambled lookup reuse gain is not negative: {control}"
+        )
     if float(control["joint_cv_error"]) <= float(structured["joint_cv_error"]) + 0.5:
         raise AssertionError("scrambled control did not destroy generator transfer")
     print(
         "self-test passed: "
         f"joint={structured['joint_cv_error']:.6f}, "
         f"closure={structured['closure_empirical_error']:.6f}, "
-        f"reuse_gain={structured['reuse_gain_bits']:.1f} bits"
+        f"ring_lookup_gain={structured['lookup_reuse_gain_bits']:.1f} bits, "
+        f"scrambled_lookup_gain={control['lookup_reuse_gain_bits']:.1f} bits"
     )
 
 
@@ -810,11 +918,20 @@ def main() -> None:
         "alias_train_fraction": args.alias_train_fraction,
         "max_dimension": args.max_dimension,
         "precision": args.precision,
-        "code": (
-            "fixed-precision Gaussian residual bits plus a BIC penalty; "
-            "the shared model pays for one orthogonal generator and the "
-            "independent model pays for one orthogonal operator per power"
+        "lookup_code": (
+            "one-step fixed-precision Gaussian residual bits plus a BIC "
+            "parameter penalty; the shared model pays for one orthogonal "
+            "successor and the lookup pays for one displacement vector per "
+            "source state, with both fitted on training aliases and residuals "
+            "scored on held-out aliases"
         ),
+        "multi_power_code": (
+            "fixed-precision Gaussian residual bits plus a BIC penalty; "
+            "the diagnostic shared model pays for one orthogonal generator "
+            "and the diagnostic independent model pays for one orthogonal "
+            "operator per tested power"
+        ),
+        "reuse_gain_bits_alias": "lookup_reuse_gain_bits",
         "projection": (
             "PCA of alias-mean state centroids, fitted without transition labels"
         ),
