@@ -328,8 +328,8 @@ def evaluate(
         action_centroids[layer].view(
             layout.states * layout.actions, width
         ).index_add_(0, flat_pair, state[:, action_position].float())
-    node_centroids /= node_counts[None, :, None]
-    output_centroids /= output_counts[None, :, None]
+    node_centroids /= node_counts.clamp_min(1)[None, :, None]
+    output_centroids /= output_counts.clamp_min(1)[None, :, None]
     action_centroids /= float(eval_aliases)
 
     final_actions = action_centroids[-1]
@@ -352,10 +352,21 @@ def evaluate(
         geometry_summary(layer, task)
         for layer in node_centroids.cpu().numpy()
     ]
-    output_layers = [
-        geometry_summary(layer, task)
-        for layer in output_centroids.cpu().numpy()
-    ]
+    if bool(torch.all(output_counts > 0)):
+        output_layers = [
+            geometry_summary(layer, task)
+            for layer in output_centroids.cpu().numpy()
+        ]
+    else:
+        supported_states = int(torch.count_nonzero(output_counts))
+        output_layers = [
+            {
+                "metrics_available": False,
+                "supported_states": supported_states,
+                "order": layout.states,
+            }
+            for _ in output_centroids
+        ]
     return (
         behavior,
         node_centroids.cpu().numpy(),
