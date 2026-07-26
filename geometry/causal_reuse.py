@@ -12,6 +12,8 @@ import numpy as np
 import torch
 
 from geogen.model import GeometryTransformer, ModelConfig
+from geogen.tasks import make_task
+from operator_reuse import orthogonal_fit
 from train import TokenLayout, build_tokens
 
 
@@ -453,8 +455,7 @@ def fit_transport(
     basis = vt[:dimension].T
     x = (source64 - center) @ basis
     y = (target64 - center) @ basis
-    u, _, vt_operator = np.linalg.svd(x.T @ y, full_matrices=False)
-    operator = u @ vt_operator
+    operator = orthogonal_fit(x, y)
     return Transport(
         center=center,
         basis=basis,
@@ -470,8 +471,7 @@ def fit_control_operator(
 ) -> np.ndarray:
     x = (np.asarray(source, dtype=np.float64) - transport.center) @ transport.basis
     y = (np.asarray(target, dtype=np.float64) - transport.center) @ transport.basis
-    u, _, vt = np.linalg.svd(x.T @ y, full_matrices=False)
-    return u @ vt
+    return orthogonal_fit(x, y)
 
 
 def apply_operator(
@@ -517,7 +517,7 @@ def behavioral_metrics(
     desired_target: np.ndarray,
     source_logits: np.ndarray,
     natural_logits: np.ndarray,
-) -> dict[str, float]:
+) -> dict[str, float | int]:
     probabilities = _softmax(logits)
     source_probabilities = _softmax(source_logits)
     natural_probabilities = _softmax(natural_logits)
@@ -542,12 +542,30 @@ def behavioral_metrics(
     intervention_logit_gain = float(
         np.mean(desired_logits - source_desired_logits)
     )
+    predictions = np.argmax(logits, axis=1)
+    source_predictions = np.argmax(source_logits, axis=1)
+    natural_predictions = np.argmax(natural_logits, axis=1)
+    qualified = (source_predictions == original_target) & (
+        natural_predictions == desired_target
+    )
     return {
         "desired_accuracy": float(
-            np.mean(np.argmax(logits, axis=1) == desired_target)
+            np.mean(predictions == desired_target)
         ),
         "original_accuracy": float(
-            np.mean(np.argmax(logits, axis=1) == original_target)
+            np.mean(predictions == original_target)
+        ),
+        "baseline_original_accuracy": float(
+            np.mean(source_predictions == original_target)
+        ),
+        "natural_shift_accuracy": float(
+            np.mean(natural_predictions == desired_target)
+        ),
+        "qualified_examples": int(np.sum(qualified)),
+        "qualified_desired_accuracy": (
+            float(np.mean(predictions[qualified] == desired_target[qualified]))
+            if np.any(qualified)
+            else float("nan")
         ),
         "desired_probability": float(np.mean(desired_probability)),
         "desired_logit_margin": float(
@@ -568,6 +586,19 @@ def behavioral_metrics(
     }
 
 
+def target_centroid_patch(
+    target: np.ndarray, target_states: np.ndarray
+) -> np.ndarray:
+    values = np.asarray(target, dtype=np.float64)
+    labels = np.asarray(target_states, dtype=np.int64)
+    centroids = np.zeros((int(labels.max()) + 1, values.shape[1]))
+    counts = np.bincount(labels, minlength=len(centroids))
+    np.add.at(centroids, labels, values)
+    occupied = counts > 0
+    centroids[occupied] /= counts[occupied, None]
+    return centroids[labels]
+
+
 def manifold_metrics(
     patch: np.ndarray,
     *,
@@ -581,12 +612,7 @@ def manifold_metrics(
     paired = np.linalg.norm(patch64 - target64, axis=1)
     source_to_target = np.linalg.norm(source64 - target64, axis=1)
 
-    centroids = np.zeros((int(target_states.max()) + 1, target.shape[1]))
-    counts = np.bincount(target_states, minlength=len(centroids))
-    np.add.at(centroids, target_states, target64)
-    occupied = counts > 0
-    centroids[occupied] /= counts[occupied, None]
-    target_centroids = centroids[target_states]
+    target_centroids = target_centroid_patch(target64, target_states)
     patch_centroid_squared = np.sum((patch64 - target_centroids) ** 2, axis=1)
     natural_centroid_squared = np.sum(
         (target64 - target_centroids) ** 2, axis=1
@@ -669,6 +695,7 @@ def evaluate_checkpoint(
     specs: list[tuple[str, int]],
     table: np.ndarray,
     train_mask: np.ndarray,
+    successor: np.ndarray,
     folds: int,
     fold_seed: int,
     state_train_fraction: float,
@@ -685,7 +712,6 @@ def evaluate_checkpoint(
     behavior: dict[str, object],
 ) -> list[dict[str, object]]:
     order = table.shape[0]
-    successor = (np.arange(order) + 1) % order
     records: list[dict[str, object]] = []
     for fold in range(folds):
         rng = np.random.default_rng(fold_seed + fold)
@@ -763,6 +789,9 @@ def evaluate_checkpoint(
             spec = (position, layer)
             source_activations = eval_source_acts[spec]
             target_activations = eval_target_acts[spec]
+            target_states = (
+                eval_target["left"] if position == "node" else desired_target
+            )
             transport = fit_transport(
                 fit_source_acts[spec],
                 fit_target_acts[spec],
@@ -780,6 +809,9 @@ def evaluate_checkpoint(
             random_patch = random_norm_matched_patch(
                 transport, source_activations, learned_patch, rng
             )
+            centroid_patch = target_centroid_patch(
+                target_activations, target_states
+            )
             controls: dict[str, tuple[np.ndarray, np.ndarray]] = {
                 "source": (source_activations, source_logits),
                 "natural_shift": (target_activations, natural_logits),
@@ -787,6 +819,7 @@ def evaluate_checkpoint(
             for name, patch in (
                 ("learned_generator", learned_patch),
                 ("exact_state_swap", target_activations),
+                ("target_centroid", centroid_patch),
                 ("scrambled_successor", scrambled_patch),
                 ("random_orthogonal", random_patch),
             ):
@@ -818,7 +851,7 @@ def evaluate_checkpoint(
                     "fit_states": len(state_train),
                     "fit_aliases": len(alias_train),
                     "canonical_shift_fraction": float(
-                        np.mean(desired_target == (original_target + 1) % order)
+                        np.mean(desired_target == successor[original_target])
                     ),
                     **behavior,
                     **behavioral_metrics(
@@ -832,7 +865,7 @@ def evaluate_checkpoint(
                         patch,
                         source=source_activations,
                         target=target_activations,
-                        target_states=eval_target["left"],
+                        target_states=target_states,
                     ),
                 }
                 records.append(record)
@@ -876,7 +909,7 @@ def run_self_test(device: torch.device) -> None:
         "context": np.zeros(7, dtype=np.int64),
     }
     shifted = _replace_left(examples, (np.arange(7) + 1) % 7)
-    specs = [("output", 1)]
+    specs = [("node", 0), ("output", 1)]
     _, source_logits = extract_activations(
         model,
         examples=examples,
@@ -895,22 +928,25 @@ def run_self_test(device: torch.device) -> None:
         device=device,
         return_logits=True,
     )
-    exact_logits = patched_logits(
-        model,
-        examples=examples,
-        patches=shifted_acts[("output", 1)],
-        layout=layout,
-        position="output",
-        layer=1,
-        batch_size=7,
-        device=device,
-    )
     assert source_logits is not None and shifted_logits is not None
-    if not np.allclose(exact_logits, shifted_logits, atol=1e-5):
-        raise AssertionError("final-residual exact swap did not reproduce logits")
+    for position, layer in specs:
+        exact_logits = patched_logits(
+            model,
+            examples=examples,
+            patches=shifted_acts[(position, layer)],
+            layout=layout,
+            position=position,
+            layer=layer,
+            batch_size=7,
+            device=device,
+        )
+        if not np.allclose(exact_logits, shifted_logits, atol=1e-5):
+            raise AssertionError(
+                f"{position} layer {layer} exact swap did not reproduce logits"
+            )
     print(
-        "self-test passed: synthetic generator recovered and final-residual "
-        "swap exactly reproduced the shifted computation"
+        "self-test passed: synthetic generator recovered and input-node plus "
+        "final-output swaps exactly reproduced the shifted computation"
     )
 
 
@@ -948,6 +984,21 @@ def main() -> None:
     order = int(config["task_order"])
     if table.shape != (order, order) or train_mask.shape != table.shape:
         raise ValueError("the saved operation table or split has the wrong shape")
+    task = make_task(
+        config["task"],
+        seed=int(
+            config.get("task_seed", config.get("split_seed", config["seed"]))
+        ),
+        corruption=float(
+            config.get(
+                "task_corruption_fraction",
+                config.get("corruption", 0.0),
+            )
+        ),
+    )
+    if task.generator is None:
+        raise ValueError(f"{config['task']} has no designated successor")
+    successor = np.asarray(table[:, task.generator], dtype=np.int64)
 
     layout = TokenLayout(
         order,
@@ -995,6 +1046,7 @@ def main() -> None:
                 specs=specs,
                 table=table,
                 train_mask=train_mask,
+                successor=successor,
                 folds=args.folds,
                 fold_seed=args.fold_seed,
                 state_train_fraction=args.state_train_fraction,
@@ -1017,6 +1069,7 @@ def main() -> None:
         "run_name": config["run_name"],
         "task": config["task"],
         "order": order,
+        "generator_relation": task.generator,
         "checkpoints": [path.name for path in checkpoints],
         "patch_sites": [
             {"position": position, "layer": layer}
@@ -1048,6 +1101,11 @@ def main() -> None:
             "exact_state_swap": (
                 "the activation from the naturally shifted input under matched "
                 "context and aliases"
+            ),
+            "target_centroid": (
+                "the desired state's centroid from natural counterfactual "
+                "activations in the held-out evaluation fold; this is a "
+                "label-informed upper bound"
             ),
             "scrambled_successor": (
                 "an orthogonal transport fitted to a frequency-matched random "
