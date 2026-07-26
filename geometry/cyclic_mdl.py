@@ -234,20 +234,16 @@ def greedy_frequency_path(
 def choose_frequencies(
     coordinates: np.ndarray,
     *,
-    outer_states: np.ndarray,
+    fit_states: np.ndarray,
+    validation_states: np.ndarray,
     aliases: np.ndarray,
     labels: np.ndarray,
     order: int,
     max_frequencies: int,
-    inner_train_fraction: float,
     precision: float,
-    rng: np.random.Generator,
 ) -> tuple[list[int], list[dict[str, object]]]:
-    inner_train_index, inner_validation_index = _split_indices(
-        len(outer_states), inner_train_fraction, rng
-    )
-    fit_states = outer_states[inner_train_index]
-    validation_states = outer_states[inner_validation_index]
+    if not len(fit_states) or not len(validation_states):
+        raise ValueError("frequency selection requires nonempty paired splits")
     max_identifiable = max((len(fit_states) - 1) // 2, 0)
     path = greedy_frequency_path(
         coordinates,
@@ -390,13 +386,23 @@ def code_comparison(
         discrete_bits=frequency_subset_bits(order, len(frequencies)),
         precision=precision,
     )
+    null_bits = model_code_bits(
+        sse=null_sse,
+        scalar_count=scalar_count,
+        continuous_parameters=dimension,
+        discrete_bits=0.0,
+        precision=precision,
+    )
     return {
         "alias_lookup_error": lookup_error,
         "alias_group_error": group_error,
         "alias_null_error": null_error,
         "alias_lookup_bits": lookup_bits,
         "alias_group_bits": group_bits,
+        "alias_null_bits": null_bits,
         "alias_mdl_gain_bits": lookup_bits - group_bits,
+        "alias_shared_vs_null_gain_bits": null_bits - group_bits,
+        "alias_usable_gain_bits": min(lookup_bits, null_bits) - group_bits,
         "alias_group_to_lookup_sse": group_sse / max(lookup_sse, 1e-30),
         "alias_group_r2_vs_null": 1.0 - group_sse / max(null_sse, 1e-30),
         "alias_lookup_r2_vs_null": 1.0
@@ -418,20 +424,19 @@ def analyze_model(
     labels: np.ndarray,
     powers: list[int],
     max_frequencies: int,
-    inner_train_fraction: float,
+    selection_fit_states: np.ndarray,
+    selection_validation_states: np.ndarray,
     precision: float,
-    rng: np.random.Generator,
 ) -> dict[str, object]:
     frequencies, selection_path = choose_frequencies(
         coordinates,
-        outer_states=state_train,
+        fit_states=selection_fit_states,
+        validation_states=selection_validation_states,
         aliases=alias_train,
         labels=labels,
         order=order,
         max_frequencies=max_frequencies,
-        inner_train_fraction=inner_train_fraction,
         precision=precision,
-        rng=rng,
     )
     coefficients = fit_fourier(
         coordinates,
@@ -489,6 +494,8 @@ def analyze_model(
         "finite_order_closure_error": closure_error,
         "power_errors": power_errors,
         "selection_path": selection_path,
+        "selection_fit_states": selection_fit_states.tolist(),
+        "selection_validation_states": selection_validation_states.tolist(),
         **code_comparison(
             coordinates,
             alias_train=alias_train,
@@ -535,6 +542,11 @@ def analyze_activation_layer(
         alias_train, alias_test = _split_indices(
             alias_count, alias_train_fraction, rng
         )
+        inner_train_index, inner_validation_index = _split_indices(
+            len(state_train), inner_train_fraction, rng
+        )
+        selection_fit_states = state_train[inner_train_index]
+        selection_validation_states = state_train[inner_validation_index]
         coordinates, dimension = project_fold(
             activations,
             states=state_train,
@@ -552,9 +564,9 @@ def analyze_activation_layer(
             labels=true_labels,
             powers=powers,
             max_frequencies=max_frequencies,
-            inner_train_fraction=inner_train_fraction,
+            selection_fit_states=selection_fit_states,
+            selection_validation_states=selection_validation_states,
             precision=precision,
-            rng=rng,
         )
         scrambled_labels = rng.permutation(order)
         scrambled = analyze_model(
@@ -567,9 +579,9 @@ def analyze_activation_layer(
             labels=scrambled_labels,
             powers=powers,
             max_frequencies=max_frequencies,
-            inner_train_fraction=inner_train_fraction,
+            selection_fit_states=selection_fit_states,
+            selection_validation_states=selection_validation_states,
             precision=precision,
-            rng=rng,
         )
         fold_records.append(
             {
@@ -579,6 +591,10 @@ def analyze_activation_layer(
                 "state_test": state_test.tolist(),
                 "alias_train": alias_train.tolist(),
                 "alias_test": alias_test.tolist(),
+                "selection_fit_states": selection_fit_states.tolist(),
+                "selection_validation_states": (
+                    selection_validation_states.tolist()
+                ),
                 "structured": structured,
                 "scrambled": scrambled,
             }
@@ -593,7 +609,10 @@ def analyze_activation_layer(
         "alias_null_error",
         "alias_lookup_bits",
         "alias_group_bits",
+        "alias_null_bits",
         "alias_mdl_gain_bits",
+        "alias_shared_vs_null_gain_bits",
+        "alias_usable_gain_bits",
         "alias_group_to_lookup_sse",
         "alias_group_r2_vs_null",
         "alias_lookup_r2_vs_null",
@@ -709,6 +728,8 @@ def run_self_test() -> None:
         raise AssertionError("finite-order generator did not close")
     if float(exact_result["alias_mdl_gain_bits"]) <= 0.0:
         raise AssertionError("exact cyclic code did not beat a lookup")
+    if float(exact_result["alias_usable_gain_bits"]) <= 0.0:
+        raise AssertionError("exact cyclic code did not beat the usable baseline")
     if float(noisy_result["joint_state_alias_error"]) >= 0.1:
         raise AssertionError(f"noisy cyclic factorization failed: {noisy_result}")
     if (
@@ -716,12 +737,59 @@ def run_self_test() -> None:
         <= float(noisy_result["joint_state_alias_error"]) + 0.5
     ):
         raise AssertionError("scrambled state order was not rejected")
+    for fold in exact_result["folds"]:
+        structured = fold["structured"]
+        control = fold["scrambled"]
+        if (
+            structured["selection_fit_states"]
+            != control["selection_fit_states"]
+            or structured["selection_validation_states"]
+            != control["selection_validation_states"]
+        ):
+            raise AssertionError(
+                "structured and scrambled models used different inner splits"
+            )
+        if (
+            fold["selection_fit_states"]
+            != structured["selection_fit_states"]
+            or fold["selection_validation_states"]
+            != structured["selection_validation_states"]
+        ):
+            raise AssertionError("stored inner split plan does not match analysis")
+    expected_usable_gain = _finite_median(
+        fold["structured"]["alias_usable_gain_bits"]
+        for fold in exact_result["folds"]
+    )
+    if exact_result["alias_usable_gain_bits"] != expected_usable_gain:
+        raise AssertionError("usable gain was not aggregated from foldwise values")
+
+    zero_frequency = np.repeat(
+        rng.normal(size=(1, aliases, 3)), order, axis=0
+    )
+    zero_result = code_comparison(
+        zero_frequency,
+        alias_train=np.asarray([0, 1]),
+        alias_test=np.asarray([2, 3]),
+        labels=np.arange(order),
+        order=order,
+        frequencies=[],
+        precision=1e-3,
+    )
+    if float(zero_result["alias_mdl_gain_bits"]) <= 0.0:
+        raise AssertionError(
+            "zero-frequency fixture did not expose the lookup-only false positive"
+        )
+    if float(zero_result["alias_shared_vs_null_gain_bits"]) >= 0.0:
+        raise AssertionError("zero-frequency shared code falsely beat the null")
+    if float(zero_result["alias_usable_gain_bits"]) >= 0.0:
+        raise AssertionError("zero-frequency fixture produced usable compression")
     print(
         "self-test passed: "
         f"exact_joint={exact_result['joint_state_alias_error']:.3g}, "
         f"noisy_joint={noisy_result['joint_state_alias_error']:.3f}, "
         f"scrambled_joint={scrambled_result['joint_state_alias_error']:.3f}, "
-        f"exact_mdl_gain={exact_result['alias_mdl_gain_bits']:.1f} bits"
+        f"exact_usable_gain={exact_result['alias_usable_gain_bits']:.1f} bits, "
+        f"zero_usable_gain={zero_result['alias_usable_gain_bits']:.1f} bits"
     )
 
 
@@ -894,14 +962,18 @@ def main() -> None:
                 "continuous parameters and an explicit log binomial code for "
                 "the selected frequency subset. The lookup transmits one "
                 "centroid per state; the group code transmits one intercept "
-                "and two loading vectors per selected real Fourier irrep."
+                "and two loading vectors per selected real Fourier irrep. A "
+                "separate intercept-only null is coded in every fold, and the "
+                "usable gain compares the group code with the better of the "
+                "lookup and null codes in that same fold."
             ),
             "interpretation_guard": (
-                "A positive MDL gain counts as compression only when the group "
-                "fit also explains held-out-alias variance and its jointly "
-                "held-out state-and-alias error beats the scrambled-order "
-                "control. This is a representational factorization, not a "
-                "causal activation-transport result."
+                "A positive usable MDL gain counts as compression only when "
+                "the group fit beats both the lookup and intercept-only null "
+                "within folds, explains held-out-alias variance, and its "
+                "jointly held-out state-and-alias error beats the paired "
+                "scrambled-order control. This is a representational "
+                "factorization, not a causal activation-transport result."
             ),
         },
         records=records,

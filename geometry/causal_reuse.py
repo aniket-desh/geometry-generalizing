@@ -1136,8 +1136,8 @@ def main() -> None:
                 "label-informed upper bound"
             ),
             "scrambled_successor": (
-                "an orthogonal transport fitted to a frequency-matched random "
-                "derangement of state successors"
+                "an orthogonal transport fitted to a random derangement of "
+                "state successors"
             ),
             "random_orthogonal": (
                 "a random orthogonal subspace displacement matched per example "
