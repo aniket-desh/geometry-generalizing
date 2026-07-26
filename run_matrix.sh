@@ -40,6 +40,7 @@ for model in "${models[@]}"; do
 done
 
 "$PYTHON_BIN" -u render_aggregate.py --results "$RESULTS_DIR" || true
+"$PYTHON_BIN" -u summarize_results.py --results "$RESULTS_DIR" || true
 
 if ((${#failures[@]})); then
   echo "failed models: ${failures[*]}"

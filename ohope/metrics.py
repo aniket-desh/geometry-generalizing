@@ -450,32 +450,38 @@ def summarize_ablation_correlations(
     union_row = {int(neuron): row for row, neuron in enumerate(union)}
     weights = ablations["token_counts"].astype(np.float64)
     weights /= weights.sum()
-    damage = ablations["kl_batches"] @ weights
+    damage = {
+        "spearman_kl": ablations["kl_batches"] @ weights,
+        "spearman_delta_nll": ablations["delta_nll_batches"] @ weights,
+        "spearman_top_change": 1.0 - ablations["agreement_batches"] @ weights,
+    }
     rows = []
 
     for sample_seed, sample in samples.items():
         chosen_rows = np.asarray([union_row[int(neuron)] for neuron in sample])
-        chosen_damage = damage[chosen_rows]
         for calibration_seed, scores in score_sets.items():
             methods = ["outgoing_norm", "activation_rms", "hope", "ohope"]
             if "fisher" in scores:
                 methods.append("fisher")
             for method in methods:
-                correlation = spearmanr(
-                    scores[method][sample],
-                    chosen_damage,
-                    nan_policy="omit",
-                ).statistic
-                rows.append(
-                    {
-                        "sample_seed": int(sample_seed),
-                        "calibration_seed": int(calibration_seed),
-                        "method": method,
-                        "spearman_kl": float(correlation),
-                        "neurons": int(len(sample)),
-                        "evaluation_tokens": int(weights.size and ablations["token_counts"].sum()),
-                    }
-                )
+                row = {
+                    "sample_seed": int(sample_seed),
+                    "calibration_seed": int(calibration_seed),
+                    "method": method,
+                    "neurons": int(len(sample)),
+                    "evaluation_tokens": int(
+                        weights.size and ablations["token_counts"].sum()
+                    ),
+                }
+                for key, target in damage.items():
+                    row[key] = float(
+                        spearmanr(
+                            scores[method][sample],
+                            target[chosen_rows],
+                            nan_policy="omit",
+                        ).statistic
+                    )
+                rows.append(row)
     write_json(output_path, rows)
     return rows
 

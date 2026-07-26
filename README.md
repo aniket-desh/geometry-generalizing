@@ -46,6 +46,7 @@ Every stage writes a completion artifact and can be resumed safely.
 python run_model.py --model gpt2 --output-root /workspace/ohope/results
 bash run_matrix.sh
 python render_aggregate.py --results /workspace/ohope/results
+python summarize_results.py --results /workspace/ohope/results
 ```
 
 The plots use the Nord palette. Repeated calibration and random seeds appear as
