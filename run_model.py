@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--capture-batch-size", type=int, default=8)
     parser.add_argument("--pruning-token-batch-size", type=int, default=512)
     parser.add_argument("--ablation-sample-size", type=int, default=192)
-    parser.add_argument("--ablation-tokens", type=int, default=10_000)
+    parser.add_argument("--ablation-tokens", type=int, default=100_000)
     parser.add_argument("--ablation-token-batch-size", type=int, default=32)
     parser.add_argument("--ablation-neuron-batch-size", type=int, default=24)
     parser.add_argument("--fisher-tokens", type=int, default=512)
@@ -238,7 +238,9 @@ def main() -> None:
                 "groups": {name: values.tolist() for name, values in groups.items()},
             },
         )
-        ablation_path = model_dir / "single_neuron_ablations.npz"
+        ablation_path = (
+            model_dir / f"single_neuron_ablations_{args.ablation_tokens}.npz"
+        )
         if ablation_path.exists() and not args.force:
             ablations = load_npz(ablation_path)
             print("  resumed single_neuron_ablations.npz", flush=True)

@@ -35,7 +35,8 @@ The default matrix runs:
 - one disjoint 100K-token evaluation stream;
 - five importance rankings plus random baselines;
 - structured pruning at 10, 20, 30, 40, 50, and 60 percent;
-- three stratified single-neuron samples;
+- three stratified single-neuron samples, each tested against the full 100K-token
+  evaluation stream;
 - the optional Fisher pullback after the static readout experiments.
 
 Every stage writes a completion artifact and can be resumed safely.
