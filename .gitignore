@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+.cache/
+results/
+smoke-results/
+logs/
+*.pt
+*.npz
+*.csv
+*.mp4
+*.png
+*.svg
