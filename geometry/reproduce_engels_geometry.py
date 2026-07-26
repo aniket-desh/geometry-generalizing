@@ -9,12 +9,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from datasets import load_dataset
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.lines import Line2D
-from sae_lens import SAE
 from sklearn.decomposition import PCA
-from transformer_lens import HookedTransformer
 
 
 # Feature clusters reported for Figure 1 of Engels et al. (2024):
@@ -106,6 +103,10 @@ def year_value(token: str) -> int:
 
 @torch.no_grad()
 def collect(args: argparse.Namespace) -> dict[str, np.ndarray]:
+    from datasets import load_dataset
+    from sae_lens import SAE
+    from transformer_lens import HookedTransformer
+
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     model = HookedTransformer.from_pretrained(
@@ -253,7 +254,7 @@ def render(payload: dict[str, np.ndarray], output: Path) -> None:
         ],
         [name[:3] for name in DAY_NAMES],
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.02),
+        bbox_to_anchor=(0.5, -0.11),
         ncol=7,
         frameon=False,
         fontsize=8,
