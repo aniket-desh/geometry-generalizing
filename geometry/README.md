@@ -228,11 +228,39 @@ optimizer checkpoints. Large outputs use their own work root,
 `/home/ubuntu/a/vi-activation-geometry-large-work`, and never share result or
 log directories with the completed core or scale suites. Summarize the exact
 nine-run suite with `--suite large`. To render or summarize a unified
-small/medium/large comparison, pass all 27 analyzed run directories to
-`render_priority.py --preset small --preset medium --preset large`, or place
-them under one root and select `--suite capacity` explicitly. Automatic suite
-detection rejects that mixed root because it contains multiple complete
-sub-suites.
+small/medium/large comparison without copying raw data, run the capacity
+finalizer after both endpoint analyses complete:
+
+```bash
+python geometry/finalize_capacity.py \
+  --scale-results-root /path/to/exact-scale18-results \
+  --large-results-root /path/to/exact-large9-results \
+  --output-root /path/to/capacity-final
+```
+
+It reuses the unchanged scale and large validators, creates a collision-checked
+union of 27 directory symlinks, renders the Nord capacity figures, and writes
+`capacity-evidence.json` plus `capacity-evidence.md`. Rerunning the same command
+is safe: it revalidates both suites, preserves matching links, and overwrites
+the derived figures and summaries. It rejects incomplete endpoint analysis,
+extra or duplicate run configs, stale symlinks, and input/output path overlap.
+
+The command is tmux-friendly because it runs in the foreground and logs both
+subcommands under its output root:
+
+```bash
+tmux new-session -d -s vi-capacity-finalize \
+  "cd /path/to/repo && python geometry/finalize_capacity.py \
+  --scale-results-root /path/to/exact-scale18-results \
+  --large-results-root /path/to/exact-large9-results \
+  --output-root /path/to/capacity-final"
+
+python geometry/finalize_capacity.py --self-test
+```
+
+Automatic summary suite detection deliberately rejects the 27-link union
+because it contains multiple complete sub-suites; the finalizer selects
+`--suite capacity` explicitly.
 
 `reproduce_engels_geometry.py` reruns the GPT-2 small layer-7 SAE feature
 clusters reported by Engels et al. on the Pile, retaining only the weekday and
