@@ -14,7 +14,6 @@ from key60_common import (
     CAUSAL_CONTROLS,
     CAUSAL_FOLDS,
     KEY_CONDITIONS,
-    KEY_COUNT,
     PRESETS,
     SEEDS,
     CausalJob,
@@ -66,8 +65,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/workspace/geometry-priority-figures"),
     )
+    parser.add_argument(
+        "--presets",
+        default="grok,micro",
+        help="Comma-separated pair of matched model presets.",
+    )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--analysis-slots", type=int, default=2)
+    parser.add_argument("--analysis-slot-root", type=Path)
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int, default=3)
     parser.add_argument("--device", default="cuda")
@@ -77,6 +82,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-log-mb", type=float, default=16.0)
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
+
+
+def _parse_presets(value: str) -> tuple[str, ...]:
+    presets = tuple(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+    if len(presets) != 2:
+        raise ValueError("--presets must select exactly two distinct model presets")
+    if any(preset not in {"grok", "micro", "small", "medium"} for preset in presets):
+        raise ValueError(f"unsupported priority presets: {presets}")
+    return presets
 
 
 def _free_gb(path: Path) -> float:
@@ -101,6 +115,8 @@ def _operator_command(run: KeyRun, device: str) -> list[str]:
         "5",
         "--max-dimension",
         "16",
+        "--projection-fit",
+        "inductive",
         "--device",
         device,
     ]
@@ -148,6 +164,7 @@ def _wait_spec(args: argparse.Namespace, spec: tuple[str, float, str, str, int])
         seed=seed,
         poll_seconds=args.poll_seconds,
         timeout_hours=args.timeout_hours,
+        presets=args.presets,
     )
 
 
@@ -164,7 +181,7 @@ def _run_operator(
         command = _operator_command(run, args.device)
         started = time.monotonic()
         with analysis_slot(
-            args.log_root / "analysis-slots",
+            args.analysis_slot_root,
             count=args.analysis_slots,
             poll_seconds=args.poll_seconds,
             timeout_hours=args.timeout_hours,
@@ -187,7 +204,10 @@ def _run_operator(
 
 def operator_stage(args: argparse.Namespace) -> None:
     marker = args.log_root / "operator-complete.json"
-    specs = sorted(expected_specs(), key=lambda spec: (HORIZONS[spec[2]], spec[3], spec[2], spec[4]))
+    specs = sorted(
+        expected_specs(args.presets),
+        key=lambda spec: (HORIZONS[spec[2]], spec[3], spec[2], spec[4]),
+    )
     results: list[dict[str, object]] = []
     atomic_json(
         args.log_root / "operator-manifest.json",
@@ -203,6 +223,7 @@ def operator_stage(args: argparse.Namespace) -> None:
             "workers": args.workers,
             "views": ["output"],
             "folds": 5,
+            "projection_fit": "inductive_state_alias_fold",
         },
     )
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -213,7 +234,7 @@ def operator_stage(args: argparse.Namespace) -> None:
             atomic_json(args.log_root / "operator-results.json", results)
             print(f"{now()} priority operator {result['run']}: {result['status']}", flush=True)
     failures = [result for result in results if result["status"] not in {"complete", "skipped_valid"}]
-    runs = discover_runs(args.results_root)
+    runs = discover_runs(args.results_root, args.presets)
     if failures or runs is None or not all(operator_output_valid(run) for run in runs):
         raise RuntimeError(f"{len(failures)} priority operator jobs failed")
     atomic_json(
@@ -227,8 +248,13 @@ def operator_stage(args: argparse.Namespace) -> None:
     )
 
 
-def _job_specs() -> list[tuple[str, float, str, str, int]]:
-    return sorted(expected_specs(), key=lambda spec: (HORIZONS[spec[2]], spec[3], spec[2], spec[4]))
+def _job_specs(
+    presets: tuple[str, ...],
+) -> list[tuple[str, float, str, str, int]]:
+    return sorted(
+        expected_specs(presets),
+        key=lambda spec: (HORIZONS[spec[2]], spec[3], spec[2], spec[4]),
+    )
 
 
 def _shard_specs(
@@ -255,7 +281,7 @@ def _run_causal(
             return {"job": job.slug, "status": "failed", "returncode": 75}
         started = time.monotonic()
         with analysis_slot(
-            args.log_root / "analysis-slots",
+            args.analysis_slot_root,
             count=args.analysis_slots,
             poll_seconds=args.poll_seconds,
             timeout_hours=args.timeout_hours,
@@ -279,7 +305,11 @@ def _run_causal(
 def causal_shard_stage(args: argparse.Namespace) -> None:
     if args.shard_index is None:
         raise ValueError("--shard-index is required for causal-shard")
-    specs = _shard_specs(_job_specs(), args.shard_index, args.shard_count)
+    specs = _shard_specs(
+        _job_specs(args.presets),
+        args.shard_index,
+        args.shard_count,
+    )
     shard_root = args.log_root / "causal" / f"shard-{args.shard_index}"
     shard_root.mkdir(parents=True, exist_ok=True)
     atomic_json(
@@ -332,6 +362,7 @@ def causal_join_stage(args: argparse.Namespace) -> None:
         results_root=args.results_root,
         poll_seconds=args.poll_seconds,
         timeout_hours=args.timeout_hours,
+        presets=args.presets,
     )
     jobs = causal_schedule(runs)
     invalid = [job.slug for job in jobs if not causal_output_valid(job)]
@@ -357,6 +388,7 @@ def finalize_stage(args: argparse.Namespace) -> None:
         results_root=args.results_root,
         poll_seconds=args.poll_seconds,
         timeout_hours=args.timeout_hours,
+        presets=args.presets,
     )
     operator_marker = args.log_root / "operator-complete.json"
     causal_marker = args.log_root / "causal-complete.json"
@@ -376,6 +408,8 @@ def finalize_stage(args: argparse.Namespace) -> None:
         "--output",
         str(args.figure_root),
     ]
+    for preset in args.presets:
+        command.extend(["--preset", preset])
     for run in runs:
         command.extend(["--run", str(run.path)])
     returncode = _run_with_capped_log(
@@ -420,7 +454,14 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
     ]
     atomic_json(
         prefix.with_suffix(".json"),
-        {"metadata": {"run_name": run.path.name, "folds": 5}, "records": records},
+        {
+            "metadata": {
+                "run_name": run.path.name,
+                "folds": 5,
+                "projection_fit": "inductive_state_alias_fold",
+            },
+            "records": records,
+        },
     )
     prefix.with_suffix(".jsonl").write_text("{}\n")
     prefix.with_suffix(".csv").write_text("step\n")
@@ -455,10 +496,10 @@ def _write_synthetic_analysis(run: KeyRun) -> None:
     prefix.with_suffix(".csv").write_text("step\n")
 
 
-def self_test() -> None:
+def self_test(presets: tuple[str, ...]) -> None:
     with tempfile.TemporaryDirectory(prefix="priority-pipeline-") as temporary:
         root = Path(temporary)
-        for task, corruption, condition, preset, seed in expected_specs():
+        for task, corruption, condition, preset, seed in expected_specs(presets):
             run_dir = root / f"{condition}-{preset}-s{seed}"
             run_dir.mkdir()
             atomic_json(
@@ -474,7 +515,7 @@ def self_test() -> None:
                     "token_seed": 100_000 + seed,
                     "aliases": 4,
                     "contexts": 16,
-                    "batch_size": 4096,
+                    "batch_size": 2048 if preset == "medium" else 4096,
                     "train_fraction": 0.3,
                     "weight_decay": 1.0,
                     "model": {"depth": 1},
@@ -487,17 +528,20 @@ def self_test() -> None:
             steps = (10_000, 30_000, 60_000) if condition == "clean" else (10_000, 30_000)
             for step in steps:
                 (run_dir / f"weights-{step:06d}.pt").touch()
-        runs = discover_runs(root)
-        if runs is None or len(runs) != KEY_COUNT:
+        runs = discover_runs(root, presets)
+        expected_count = len(expected_specs(presets))
+        if runs is None or len(runs) != expected_count:
             raise AssertionError("mixed-horizon matrix did not validate")
         for run in runs:
             _write_synthetic_analysis(run)
         if not all(operator_output_valid(run) for run in runs):
             raise AssertionError("operator validation failed")
         jobs = causal_schedule(runs)
-        if len(jobs) != KEY_COUNT or not all(causal_output_valid(job) for job in jobs):
+        if len(jobs) != expected_count or not all(causal_output_valid(job) for job in jobs):
             raise AssertionError("causal validation failed")
-        shards = [_shard_specs(_job_specs(), index, 4) for index in range(4)]
+        shards = [
+            _shard_specs(_job_specs(presets), index, 4) for index in range(4)
+        ]
         if [len(shard) for shard in shards] != [5, 5, 4, 4]:
             raise AssertionError("18 causal jobs did not partition across four shards")
         flattened = [spec for shard in shards for spec in shard]
@@ -514,8 +558,11 @@ def self_test() -> None:
 
 def main() -> None:
     args = parse_args()
+    args.presets = _parse_presets(args.presets)
+    if args.analysis_slot_root is None:
+        args.analysis_slot_root = args.log_root / "analysis-slots"
     if args.self_test:
-        self_test()
+        self_test(args.presets)
         return
     if args.stage is None:
         raise ValueError("--stage is required unless --self-test is used")

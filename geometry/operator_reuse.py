@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-samples", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--precision", type=float, default=1e-3)
+    parser.add_argument(
+        "--projection-fit",
+        choices=("inductive",),
+        default="inductive",
+        help="Fit centering, scale, and PCA inside each state/alias training fold.",
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
@@ -100,6 +106,42 @@ def resolve_generator_relation(
 def orthogonal_fit(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     u, _, vt = np.linalg.svd(x.T @ y, full_matrices=False)
     return u @ vt
+
+
+def affine_orthogonal_fit(
+    x: np.ndarray,
+    y: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit y = xR + t with an orthogonal R and one shared translation."""
+
+    x_center = x.mean(axis=0, keepdims=True)
+    y_center = y.mean(axis=0, keepdims=True)
+    rotation = orthogonal_fit(x - x_center, y - y_center)
+    translation = (y_center - x_center @ rotation).ravel()
+    return rotation, translation
+
+
+def affine_apply(
+    values: np.ndarray,
+    transform: tuple[np.ndarray, np.ndarray],
+) -> np.ndarray:
+    rotation, translation = transform
+    return values @ rotation + translation
+
+
+def affine_power(
+    transform: tuple[np.ndarray, np.ndarray],
+    exponent: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if exponent < 0:
+        raise ValueError("affine exponent must be non-negative")
+    rotation, translation = transform
+    result_rotation = np.eye(rotation.shape[0])
+    result_translation = np.zeros(rotation.shape[0])
+    for _ in range(exponent):
+        result_translation = result_translation @ rotation + translation
+        result_rotation = result_rotation @ rotation
+    return result_rotation, result_translation
 
 
 def normalized_error(
@@ -155,15 +197,19 @@ def successor_powers(successor: np.ndarray, powers: Iterable[int]) -> dict[int, 
 def project_state_subspace(
     activations: np.ndarray,
     *,
+    fit_states: np.ndarray,
+    fit_aliases: np.ndarray,
     max_dimension: int,
-    sample_limit: int,
 ) -> tuple[np.ndarray, int]:
-    """Project aliases through a PCA basis fitted to alias-mean state centroids."""
+    """Project all aliases through a basis fitted only on one training fold."""
 
     values = np.asarray(activations, dtype=np.float64)
     if values.ndim != 3:
         raise ValueError("activations must have shape [state, alias, width]")
-    state_centroids = values.mean(axis=1)
+    if not len(fit_states) or not len(fit_aliases):
+        raise ValueError("projection fit requires training states and aliases")
+    fit_values = values[np.ix_(fit_states, fit_aliases)]
+    state_centroids = fit_values.mean(axis=1)
     center = state_centroids.mean(axis=0, keepdims=True)
     _, singular, vt = np.linalg.svd(state_centroids - center, full_matrices=False)
     if not singular.size or singular[0] <= 1e-12:
@@ -174,11 +220,13 @@ def project_state_subspace(
         numerical_rank,
         state_centroids.shape[0] - 1,
         values.shape[-1],
-        max(sample_limit - 1, 1),
     )
+    if dimension < 1:
+        raise ValueError("activation state centroids have zero rank")
     basis = vt[:dimension].T
     coordinates = (values - center) @ basis
-    rms = float(np.sqrt(np.mean(coordinates**2)))
+    fit_coordinates = coordinates[np.ix_(fit_states, fit_aliases)]
+    rms = float(np.sqrt(np.mean(fit_coordinates**2)))
     if rms <= 1e-12:
         raise ValueError("projected activations have zero scale")
     return coordinates / rms, dimension
@@ -246,9 +294,9 @@ def lookup_vs_shared_successor_code(
         coordinates, successor, states, alias_test
     )
 
-    shared = orthogonal_fit(x_train, y_train)
+    shared = affine_orthogonal_fit(x_train, y_train)
     shared_error, shared_sse, scalar_count = normalized_error(
-        x_test @ shared, y_test
+        affine_apply(x_test, shared), y_test
     )
 
     displacement = (
@@ -265,7 +313,7 @@ def lookup_vs_shared_successor_code(
     )
 
     dimension = coordinates.shape[-1]
-    shared_parameters = dimension * (dimension - 1) // 2
+    shared_parameters = dimension * (dimension - 1) // 2 + dimension
     lookup_parameters = coordinates.shape[0] * dimension
     shared_bits = bic_code_bits(
         sse=shared_sse,
@@ -322,7 +370,7 @@ def analyze_fold(
         "alias": (state_all, alias_train, state_all, alias_test),
         "joint": (state_train, alias_train, state_test, joint_test_aliases),
     }
-    operators: dict[str, np.ndarray] = {}
+    operators: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     split_errors: dict[str, float] = {}
     for name, (train_states, train_aliases, test_states, test_aliases) in split_specs.items():
         if not len(train_aliases) or not len(test_aliases):
@@ -334,9 +382,12 @@ def analyze_fold(
         x_test, y_test = _cartesian_examples(
             coordinates, shift_maps[1], test_states, test_aliases
         )
-        operator = orthogonal_fit(x_train, y_train)
+        operator = affine_orthogonal_fit(x_train, y_train)
         operators[name] = operator
-        split_errors[name] = normalized_error(x_test @ operator, y_test)[0]
+        split_errors[name] = normalized_error(
+            affine_apply(x_test, operator),
+            y_test,
+        )[0]
 
     joint = operators.get("joint")
     if joint is None:
@@ -366,9 +417,12 @@ def analyze_fold(
         x_test, y_test = _cartesian_examples(
             coordinates, target_map, state_test, joint_test_aliases
         )
-        generator_prediction = x_test @ np.linalg.matrix_power(joint, exponent)
-        independent = orthogonal_fit(x_train, y_train)
-        independent_prediction = x_test @ independent
+        generator_prediction = affine_apply(
+            x_test,
+            affine_power(joint, exponent),
+        )
+        independent = affine_orthogonal_fit(x_train, y_train)
+        independent_prediction = affine_apply(x_test, independent)
         generator_error, power_generator_sse, count = normalized_error(
             generator_prediction, y_test
         )
@@ -382,7 +436,7 @@ def analyze_fold(
         scalar_count += count
 
     dimension = coordinates.shape[-1]
-    orthogonal_parameters = dimension * (dimension - 1) // 2
+    orthogonal_parameters = dimension * (dimension - 1) // 2 + dimension
     multi_power_generator_bits = bic_code_bits(
         sse=generator_sse,
         scalar_count=scalar_count,
@@ -395,9 +449,16 @@ def analyze_fold(
         parameter_count=len(powers) * orthogonal_parameters,
         precision=precision,
     )
-    closure = np.linalg.matrix_power(joint, closure_exponent)
+    closure_rotation, closure_translation = affine_power(
+        joint,
+        closure_exponent,
+    )
     closure_matrix_error = float(
-        np.linalg.norm(closure - np.eye(dimension)) / math.sqrt(dimension)
+        math.sqrt(
+            np.linalg.norm(closure_rotation - np.eye(dimension)) ** 2
+            + np.linalg.norm(closure_translation) ** 2
+        )
+        / math.sqrt(dimension + 1)
     )
     x_closure, y_closure = _cartesian_examples(
         coordinates,
@@ -405,7 +466,13 @@ def analyze_fold(
         state_test,
         joint_test_aliases,
     )
-    closure_empirical_error = normalized_error(x_closure @ closure, y_closure)[0]
+    closure_empirical_error = normalized_error(
+        affine_apply(
+            x_closure,
+            (closure_rotation, closure_translation),
+        ),
+        y_closure,
+    )[0]
     lookup_code = lookup_vs_shared_successor_code(
         coordinates,
         successor=shift_maps[1],
@@ -455,13 +522,6 @@ def analyze_activation_layer(
     precision: float,
 ) -> dict[str, object]:
     state_count, alias_count, _ = activations.shape
-    expected_states = max(1, round(state_count * state_train_fraction))
-    expected_aliases = max(1, round(alias_count * alias_train_fraction))
-    coordinates, dimension = project_state_subspace(
-        activations,
-        max_dimension=max_dimension,
-        sample_limit=expected_states * expected_aliases,
-    )
     fold_records: list[dict[str, object]] = []
     for fold in range(folds):
         rng = np.random.default_rng(fold_seed + fold)
@@ -471,19 +531,27 @@ def analyze_activation_layer(
         alias_train, alias_test = _split_indices(
             alias_count, alias_train_fraction, rng
         )
-        fold_records.append(
-            analyze_fold(
-                coordinates,
-                successor=successor,
-                powers=powers,
-                closure_exponent=state_count,
-                state_train=state_train,
-                state_test=state_test,
-                alias_train=alias_train,
-                alias_test=alias_test,
-                precision=precision,
-            )
+        coordinates, dimension = project_state_subspace(
+            activations,
+            fit_states=state_train,
+            fit_aliases=alias_train,
+            max_dimension=max_dimension,
         )
+        result = analyze_fold(
+            coordinates,
+            successor=successor,
+            powers=powers,
+            closure_exponent=state_count,
+            state_train=state_train,
+            state_test=state_test,
+            alias_train=alias_train,
+            alias_test=alias_test,
+            precision=precision,
+        )
+        result["projection_dimension"] = dimension
+        result["projection_fit_states"] = state_train.tolist()
+        result["projection_fit_aliases"] = alias_train.tolist()
+        fold_records.append(result)
 
     scalar_keys = (
         "state_cv_error",
@@ -506,7 +574,21 @@ def analyze_activation_layer(
         "reuse_gain_bits",
     )
     summary: dict[str, object] = {
-        "dimension": dimension,
+        "dimension": int(
+            round(
+                float(
+                    np.median(
+                        [
+                            int(record["projection_dimension"])
+                            for record in fold_records
+                        ]
+                    )
+                )
+            )
+        ),
+        "fold_dimensions": [
+            int(record["projection_dimension"]) for record in fold_records
+        ],
         **{
             key: _finite_median(record.get(key) for record in fold_records)
             for key in scalar_keys
@@ -690,16 +772,20 @@ def write_outputs(
 ) -> None:
     prefix.parent.mkdir(parents=True, exist_ok=True)
     json_path = prefix.with_suffix(".json")
+    jsonl_path = prefix.with_suffix(".jsonl")
     csv_path = prefix.with_suffix(".csv")
     payload = _json_safe({"metadata": metadata, "records": records})
     json_path.write_text(json.dumps(payload, indent=2) + "\n")
+    jsonl_path.write_text(
+        "".join(json.dumps(_json_safe(record)) + "\n" for record in records)
+    )
     rows = _csv_rows(records)
     fieldnames = sorted({key for row in rows for key in row})
     with csv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    print(f"wrote {json_path} and {csv_path}")
+    print(f"wrote {json_path}, {jsonl_path}, and {csv_path}")
 
 
 def run_self_test() -> None:
@@ -725,6 +811,29 @@ def run_self_test() -> None:
     activations = base[:, None, :] @ embedding.T
     activations = np.repeat(activations, aliases, axis=1)
     activations += 1e-4 * rng.normal(size=activations.shape)
+    fit_states = np.arange(8)
+    fit_aliases = np.arange(2)
+    baseline_coordinates, baseline_dimension = project_state_subspace(
+        activations,
+        fit_states=fit_states,
+        fit_aliases=fit_aliases,
+        max_dimension=2,
+    )
+    perturbed = activations.copy()
+    held_out = np.ones(perturbed.shape[:2], dtype=bool)
+    held_out[np.ix_(fit_states, fit_aliases)] = False
+    perturbed[held_out] += 1e6 * rng.normal(size=perturbed[held_out].shape)
+    perturbed_coordinates, perturbed_dimension = project_state_subspace(
+        perturbed,
+        fit_states=fit_states,
+        fit_aliases=fit_aliases,
+        max_dimension=2,
+    )
+    if baseline_dimension != perturbed_dimension or not np.allclose(
+        baseline_coordinates[np.ix_(fit_states, fit_aliases)],
+        perturbed_coordinates[np.ix_(fit_states, fit_aliases)],
+    ):
+        raise AssertionError("held-out vocabulary changed the projection fit")
     successor = (np.arange(order) + 1) % order
     structured = analyze_activation_layer(
         activations,
@@ -950,9 +1059,10 @@ def main() -> None:
         "alias_train_fraction": args.alias_train_fraction,
         "max_dimension": args.max_dimension,
         "precision": args.precision,
+        "projection_fit": "inductive_state_alias_fold",
         "lookup_code": (
             "one-step fixed-precision Gaussian residual bits plus a BIC "
-            "parameter penalty; the shared model pays for one orthogonal "
+            "parameter penalty; the shared model pays for one affine-orthogonal "
             "successor and the lookup pays for one displacement vector per "
             "source state, with both fitted on training aliases and residuals "
             "scored on held-out aliases; the zero-prediction null pays no "
@@ -960,13 +1070,15 @@ def main() -> None:
         ),
         "multi_power_code": (
             "fixed-precision Gaussian residual bits plus a BIC penalty; "
-            "the diagnostic shared model pays for one orthogonal generator "
-            "and the diagnostic independent model pays for one orthogonal "
-            "operator per tested power"
+            "the diagnostic shared model pays for one affine-orthogonal "
+            "generator and the diagnostic independent model pays for one "
+            "affine-orthogonal operator per tested power"
         ),
         "reuse_gain_bits_alias": "lookup_reuse_gain_bits",
         "projection": (
-            "PCA of alias-mean state centroids, fitted without transition labels"
+            "fold-local PCA of state centroids using only training states and "
+            "training aliases; centering, basis selection, dimensionality, and "
+            "RMS scale never use held-out vocabulary"
         ),
     }
     write_outputs(prefix=prefix, metadata=metadata, records=records)

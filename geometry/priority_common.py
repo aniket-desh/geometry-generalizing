@@ -12,7 +12,6 @@ from key60_common import (
     CAUSAL_CONTROLS,
     CAUSAL_FOLDS,
     KEY_CONDITIONS,
-    KEY_COUNT,
     PRESETS,
     SEEDS,
     CausalJob,
@@ -82,16 +81,23 @@ def _behavior_at(run_dir: Path, step: int) -> float | None:
     return value
 
 
-def _identity_valid(config: dict[str, object]) -> bool:
+def _identity_valid(
+    config: dict[str, object],
+    *,
+    presets: tuple[str, ...],
+) -> bool:
     try:
         seed = int(config["seed"])
+        preset = str(config.get("preset"))
+        expected_batch_size = 2_048 if preset == "medium" else 4_096
         return (
-            int(config.get("split_seed", seed)) == seed
+            preset in presets
+            and int(config.get("split_seed", seed)) == seed
             and int(config.get("task_seed", seed)) == seed
             and int(config.get("token_seed", -1)) == 100_000 + seed
             and int(config.get("aliases", -1)) == 4
             and int(config.get("contexts", -1)) == 16
-            and int(config.get("batch_size", -1)) == 4096
+            and int(config.get("batch_size", -1)) == expected_batch_size
             and abs(float(config.get("train_fraction", -1.0)) - 0.3) < 1e-8
             and abs(float(config.get("weight_decay", -1.0)) - 1.0) < 1e-8
         )
@@ -99,22 +105,25 @@ def _identity_valid(config: dict[str, object]) -> bool:
         return False
 
 
-def expected_specs() -> list[tuple[str, float, str, str, int]]:
+def expected_specs(
+    presets: tuple[str, ...] = PRESETS,
+) -> list[tuple[str, float, str, str, int]]:
     return [
         (task, corruption, condition, preset, seed)
         for task, corruption, condition in KEY_CONDITIONS
-        for preset in PRESETS
+        for preset in presets
         for seed in SEEDS
     ]
 
 
 def _indexed_runs(
     results_root: Path,
+    presets: tuple[str, ...] = PRESETS,
 ) -> dict[tuple[str, str, int], list[KeyRun]]:
     indexed: dict[tuple[str, str, int], list[KeyRun]] = {}
     for config_path in results_root.glob("*/config.json"):
         config = load_json(config_path)
-        if not isinstance(config, dict) or not _identity_valid(config):
+        if not isinstance(config, dict) or not _identity_valid(config, presets=presets):
             continue
         task = str(config.get("task"))
         corruption = float(
@@ -126,7 +135,7 @@ def _indexed_runs(
         condition = _condition_for(task, corruption)
         preset = str(config.get("preset"))
         seed = int(config.get("seed", -1))
-        if condition is None or preset not in PRESETS or seed not in SEEDS:
+        if condition is None or preset not in presets or seed not in SEEDS:
             continue
         run = KeyRun(
             path=config_path.parent,
@@ -157,8 +166,9 @@ def find_run(
     condition: str,
     preset: str,
     seed: int,
+    presets: tuple[str, ...] = PRESETS,
 ) -> KeyRun | None:
-    candidates = _indexed_runs(results_root).get((condition, preset, seed), [])
+    candidates = _indexed_runs(results_root, presets).get((condition, preset, seed), [])
     if len(candidates) != 1 or not run_ready(candidates[0]):
         return None
     return candidates[0]
@@ -172,6 +182,7 @@ def wait_for_run(
     seed: int,
     poll_seconds: float,
     timeout_hours: float,
+    presets: tuple[str, ...] = PRESETS,
 ) -> KeyRun:
     deadline = time.monotonic() + timeout_hours * 3600
     previous_signature = None
@@ -181,6 +192,7 @@ def wait_for_run(
             condition=condition,
             preset=preset,
             seed=seed,
+            presets=presets,
         )
         if run is not None:
             signature = _checkpoint_signature([run])
@@ -193,12 +205,15 @@ def wait_for_run(
     raise TimeoutError(f"priority run did not validate: {condition}-{preset}-s{seed}")
 
 
-def discover_runs(results_root: Path) -> list[KeyRun] | None:
-    indexed = _indexed_runs(results_root)
+def discover_runs(
+    results_root: Path,
+    presets: tuple[str, ...] = PRESETS,
+) -> list[KeyRun] | None:
+    indexed = _indexed_runs(results_root, presets)
 
     runs: list[KeyRun] = []
     for _, _, condition in KEY_CONDITIONS:
-        for preset in PRESETS:
+        for preset in presets:
             for seed in SEEDS:
                 candidates = indexed.get((condition, preset, seed), [])
                 if len(candidates) != 1:
@@ -207,7 +222,8 @@ def discover_runs(results_root: Path) -> list[KeyRun] | None:
                 if not run_ready(run):
                     return None
                 runs.append(run)
-    if len(runs) != KEY_COUNT:
+    expected_count = len(KEY_CONDITIONS) * len(presets) * len(SEEDS)
+    if len(runs) != expected_count:
         return None
     return sorted(runs, key=lambda run: (run.preset, run.condition, run.seed))
 
@@ -226,12 +242,13 @@ def wait_for_runs(
     results_root: Path,
     poll_seconds: float,
     timeout_hours: float,
+    presets: tuple[str, ...] = PRESETS,
 ) -> list[KeyRun]:
     deadline = time.monotonic() + timeout_hours * 3600
     previous_signature = None
     last_message = 0.0
     while time.monotonic() < deadline:
-        runs = discover_runs(results_root)
+        runs = discover_runs(results_root, presets)
         if runs is not None:
             signature = _checkpoint_signature(runs)
             if signature == previous_signature:
@@ -261,6 +278,7 @@ def operator_output_valid(run: KeyRun) -> bool:
         not isinstance(metadata, dict)
         or metadata.get("run_name") != config.get("run_name")
         or int(metadata.get("folds", -1)) != 5
+        or metadata.get("projection_fit") != "inductive_state_alias_fold"
         or not isinstance(records, list)
     ):
         return False

@@ -50,14 +50,20 @@ corruption and the random-table control run to 30k. The four shards carry the
 same total number of scheduled training steps and cannot duplicate an identity.
 
 The launcher also starts marker-gated operator analysis, four causal shards,
-the causal join, final rendering, and packing in separate named tmux sessions.
+the causal join, and final rendering in separate named tmux sessions.
 Operator and causal work share a four-slot filesystem semaphore, so analysis
 can use the four devices without launching an unbounded subprocess fleet.
+Every operator fold fits its centering, PCA basis, rank, and scale using only
+the training-state × training-alias cross-product. Held-out activations are
+projected afterward, and the reusable action is scored as one affine-orthogonal
+map, so neither the representation basis nor the transition fit sees test
+vocabulary.
 The final marker is withheld until behavior, generator geometry, usable
 shared-rule MDL, and causal outputs validate for all 18 runs.
 `render_priority.py` writes Nord spaghetti plots with faded seeds and bold
-pointwise medians, and `pack_priority.py` freezes and archives the exact
-mixed-horizon evidence bundle.
+pointwise medians. Packing is independently disabled by default because
+`pack_priority.py` uploads the archive to its configured endpoint; enable it
+only with `PRIORITY_LAUNCH_PACK=1`.
 
 On the four-GPU host, the defaults expect the checkout at
 `/home/ubuntu/a/vi-activation-geometry` and put all generated state under
@@ -99,14 +105,25 @@ PRIORITY_LAUNCH_SCALE=1 \
 PRIORITY_LAUNCH_KEY_TRAIN=0 \
   PRIORITY_LAUNCH_ANALYSIS=0 \
   PRIORITY_LAUNCH_SCALE=1 \
+  PRIORITY_LAUNCH_SCALE_ANALYSIS=0 \
   PRIORITY_SCALE_PHASE=parallel \
+  geometry/launch_priority_tmux.sh
+
+# Add endpoint analysis after the key and scale training sessions exist.
+PRIORITY_LAUNCH_KEY_TRAIN=0 \
+  PRIORITY_LAUNCH_ANALYSIS=1 \
+  PRIORITY_LAUNCH_PACK=0 \
+  PRIORITY_LAUNCH_SCALE_TRAIN=0 \
+  PRIORITY_LAUNCH_SCALE_ANALYSIS=1 \
   geometry/launch_priority_tmux.sh
 ```
 
 Scale artifacts use their own roots, set independently with
-`PRIORITY_SCALE_RESULTS_ROOT` and `PRIORITY_SCALE_LOG_ROOT`. A 5%-corruption
-extension is intentionally excluded from this launch plan until the matched
-three-seed evidence is complete.
+`PRIORITY_SCALE_RESULTS_ROOT`, `PRIORITY_SCALE_LOG_ROOT`, and
+`PRIORITY_SCALE_FIGURE_ROOT`. Scale and key operator/causal processes share the
+key analysis-slot directory, so together they never exceed the configured
+analysis concurrency. A 5%-corruption extension is intentionally excluded from
+this launch plan until the matched three-seed evidence is complete.
 
 `reproduce_engels_geometry.py` reruns the GPT-2 small layer-7 SAE feature
 clusters reported by Engels et al. on the Pile, retaining only the weekday and

@@ -19,10 +19,14 @@ upload_endpoint="${PRIORITY_UPLOAD_ENDPOINT:-https://temp.sh/upload}"
 compile="${PRIORITY_COMPILE:-1}"
 launch_key_train="${PRIORITY_LAUNCH_KEY_TRAIN:-1}"
 launch_analysis="${PRIORITY_LAUNCH_ANALYSIS:-1}"
+launch_pack="${PRIORITY_LAUNCH_PACK:-0}"
 launch_scale="${PRIORITY_LAUNCH_SCALE:-0}"
+launch_scale_train="${PRIORITY_LAUNCH_SCALE_TRAIN:-${launch_scale}}"
+launch_scale_analysis="${PRIORITY_LAUNCH_SCALE_ANALYSIS:-${launch_scale}}"
 scale_phase="${PRIORITY_SCALE_PHASE:-parallel}"
 scale_results_root="${PRIORITY_SCALE_RESULTS_ROOT:-${work_root}/scale-results}"
 scale_log_root="${PRIORITY_SCALE_LOG_ROOT:-${work_root}/scale-logs}"
+scale_figure_root="${PRIORITY_SCALE_FIGURE_ROOT:-${work_root}/scale-figures}"
 gpu_ids=(0 1 2 3)
 shard_count="${#gpu_ids[@]}"
 dry_run=0
@@ -66,7 +70,9 @@ case "${scale_phase}" in
     parallel|after-key) ;;
     *) echo "PRIORITY_SCALE_PHASE must be parallel or after-key" >&2; exit 2 ;;
 esac
-for toggle in "${launch_key_train}" "${launch_analysis}" "${launch_scale}"; do
+for toggle in \
+    "${launch_key_train}" "${launch_analysis}" "${launch_pack}" \
+    "${launch_scale_train}" "${launch_scale_analysis}"; do
     case "${toggle}" in
         0|1) ;;
         *) echo "PRIORITY_LAUNCH_* switches must be 0 or 1" >&2; exit 2 ;;
@@ -75,7 +81,7 @@ done
 for path in \
     "${repo_root}" "${work_root}" "${venv_python}" "${results_root}" \
     "${log_root}" "${figure_root}" "${selection_root}" "${archive_root}" \
-    "${scale_results_root}" "${scale_log_root}"; do
+    "${scale_results_root}" "${scale_log_root}" "${scale_figure_root}"; do
     if [[ "${path}" == *"'"* ]]; then
         echo "paths containing single quotes are unsupported: ${path}" >&2
         exit 2
@@ -100,9 +106,9 @@ if (( ! dry_run )); then
     mkdir -p \
         "${results_root}" "${log_root}/tmux" "${figure_root}" \
         "${selection_root}" "${archive_root}"
-    if (( launch_scale )); then
+    if (( launch_scale_train || launch_scale_analysis )); then
         mkdir -p \
-            "${scale_results_root}" "${scale_log_root}/tmux"
+            "${scale_results_root}" "${scale_log_root}/tmux" "${scale_figure_root}"
     fi
 fi
 
@@ -144,7 +150,7 @@ if (( launch_key_train )); then
     done
 fi
 
-if (( launch_scale )); then
+if (( launch_scale_train )); then
     scale_wait=""
     if [[ "${scale_phase}" == "after-key" ]]; then
         scale_wait="--wait-for-key-root \"${log_root}/training\""
@@ -173,11 +179,38 @@ if (( launch_analysis )); then
     start_session 0 "${session_prefix}-finalize" \
         "\"${venv_python}\" geometry/priority_pipeline.py --stage finalize --shard-count ${shard_count} ${common}"
 
+fi
+
+if (( launch_pack )); then
     start_session 0 "${session_prefix}-pack" \
         "\"${venv_python}\" geometry/pack_priority.py --results-root \"${results_root}\" --log-root \"${log_root}\" --figure-root \"${figure_root}\" --selection-root \"${selection_root}\" --output-root \"${archive_root}\" --timeout-hours ${timeout_hours} --min-free-gib ${min_free_gb} --chunk-mib ${chunk_mib} --upload-endpoint \"${upload_endpoint}\""
 fi
 
-expected_sessions=$((launch_key_train * 4 + launch_analysis * 8 + launch_scale * 4))
+if (( launch_scale_analysis )); then
+    scale_common="--presets small,medium --results-root \"${scale_results_root}\" --log-root \"${scale_log_root}\" --figure-root \"${scale_figure_root}\" --analysis-slots ${analysis_slots} --analysis-slot-root \"${log_root}/analysis-slots\" --timeout-hours ${timeout_hours} --min-free-gb ${min_free_gb} --device cuda"
+    start_session 0 "${session_prefix}-scale-operator" \
+        "\"${venv_python}\" geometry/priority_pipeline.py --stage operator --workers ${operator_workers} ${scale_common}" \
+        "${scale_log_root}/tmux"
+    for shard in "${gpu_ids[@]}"; do
+        start_session "${shard}" "${session_prefix}-scale-causal-gpu${shard}" \
+            "\"${venv_python}\" geometry/priority_pipeline.py --stage causal-shard --shard-index ${shard} --shard-count ${shard_count} ${scale_common}" \
+            "${scale_log_root}/tmux"
+    done
+    start_session 0 "${session_prefix}-scale-causal-join" \
+        "\"${venv_python}\" geometry/priority_pipeline.py --stage causal-join --shard-count ${shard_count} ${scale_common}" \
+        "${scale_log_root}/tmux"
+    start_session 0 "${session_prefix}-scale-finalize" \
+        "\"${venv_python}\" geometry/priority_pipeline.py --stage finalize --shard-count ${shard_count} ${scale_common}" \
+        "${scale_log_root}/tmux"
+fi
+
+expected_sessions=$((
+    launch_key_train * 4
+    + launch_analysis * 7
+    + launch_pack
+    + launch_scale_train * 4
+    + launch_scale_analysis * 7
+))
 if (( session_count != expected_sessions )); then
     echo "internal session plan is incomplete: ${session_count}" >&2
     exit 2

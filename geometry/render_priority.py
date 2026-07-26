@@ -15,7 +15,7 @@ from matplotlib import pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.ticker import PercentFormatter
 
-from key60_common import KEY_CONDITIONS, KEY_COUNT, PRESETS, SEEDS, CausalJob, KeyRun, atomic_json, load_json
+from key60_common import KEY_CONDITIONS, PRESETS, SEEDS, CausalJob, KeyRun, atomic_json, load_json
 from priority_common import (
     HORIZONS,
     causal_output_valid,
@@ -52,12 +52,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--run", type=Path, action="append")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--preset", action="append", dest="presets")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-output", type=Path)
     return parser.parse_args()
 
 
-def _load_runs(paths: Iterable[Path]) -> list[KeyRun]:
+def _load_runs(paths: Iterable[Path], presets: tuple[str, ...]) -> list[KeyRun]:
     runs = []
     for path in paths:
         config = load_json(path / "config.json")
@@ -89,12 +90,13 @@ def _load_runs(paths: Iterable[Path]) -> list[KeyRun]:
     expected = {
         (condition, preset, seed)
         for _, _, condition in KEY_CONDITIONS
-        for preset in PRESETS
+        for preset in presets
         for seed in SEEDS
     }
-    if len(runs) != KEY_COUNT or observed != expected:
+    expected_count = len(KEY_CONDITIONS) * len(presets) * len(SEEDS)
+    if len(runs) != expected_count or observed != expected:
         raise ValueError(
-            f"expected exact {KEY_COUNT}-run priority matrix; "
+            f"expected exact {expected_count}-run priority matrix; "
             f"missing={sorted(expected - observed)}, extra={sorted(observed - expected)}"
         )
     return sorted(runs, key=lambda run: (run.preset, run.condition, run.seed))
@@ -188,7 +190,11 @@ def _causal_curve(run: KeyRun) -> tuple[np.ndarray, np.ndarray]:
     return np.asarray([horizon_for(run)], dtype=float), np.asarray([_causal_value(run)])
 
 
-def render_spaghetti(runs: list[KeyRun], output: Path) -> list[Path]:
+def render_spaghetti(
+    runs: list[KeyRun],
+    output: Path,
+    presets: tuple[str, ...],
+) -> list[Path]:
     specs: tuple[tuple[str, str, Callable[[KeyRun], tuple[np.ndarray, np.ndarray]]], ...] = (
         ("held-out accuracy", "accuracy", _behavior_curve),
         ("generator error", "error", lambda run: _operator_curve(run, "joint_cv_error")),
@@ -200,7 +206,7 @@ def render_spaghetti(runs: list[KeyRun], output: Path) -> list[Path]:
         ("causal endpoint", "success", _causal_curve),
     )
     fig, axes = plt.subplots(
-        len(PRESETS),
+        len(presets),
         len(specs),
         figsize=(12.7, 5.25),
         constrained_layout=True,
@@ -208,7 +214,7 @@ def render_spaghetti(runs: list[KeyRun], output: Path) -> list[Path]:
         sharex="col",
     )
     fig.patch.set_alpha(0)
-    for row, preset in enumerate(PRESETS):
+    for row, preset in enumerate(presets):
         for column, (title, ylabel, curve_fn) in enumerate(specs):
             axis = axes[row, column]
             for _, _, condition in KEY_CONDITIONS:
@@ -229,7 +235,7 @@ def render_spaghetti(runs: list[KeyRun], output: Path) -> list[Path]:
             if row == 0:
                 axis.set_title(title, fontweight="normal")
             axis.set_ylabel(f"{preset}\n{ylabel}" if column == 0 else ylabel)
-            if row == len(PRESETS) - 1:
+            if row == len(presets) - 1:
                 axis.set_xlabel("step")
             axis.set_xlim(-1_500, 61_500)
             _step_axis(axis)
@@ -270,9 +276,13 @@ def render_spaghetti(runs: list[KeyRun], output: Path) -> list[Path]:
     return _save(fig, output / "priority-spaghetti")
 
 
-def render_causal_controls(runs: list[KeyRun], output: Path) -> list[Path]:
+def render_causal_controls(
+    runs: list[KeyRun],
+    output: Path,
+    presets: tuple[str, ...],
+) -> list[Path]:
     fig, axes = plt.subplots(
-        len(PRESETS),
+        len(presets),
         len(KEY_CONDITIONS),
         figsize=(9.2, 5.2),
         constrained_layout=True,
@@ -283,7 +293,7 @@ def render_causal_controls(runs: list[KeyRun], output: Path) -> list[Path]:
     fig.patch.set_alpha(0)
     x = np.arange(len(CONTROL_ORDER))
     colors = [NORD["green"], NORD["frost_dark"], NORD["cyan"], NORD["orange"], NORD["purple"]]
-    for row, preset in enumerate(PRESETS):
+    for row, preset in enumerate(presets):
         for column, (_, _, condition) in enumerate(KEY_CONDITIONS):
             axis = axes[row, column]
             seed_curves = []
@@ -319,7 +329,11 @@ def render_causal_controls(runs: list[KeyRun], output: Path) -> list[Path]:
     return _save(fig, output / "priority-causal-controls")
 
 
-def render(runs: list[KeyRun], output: Path) -> dict[str, object]:
+def render(
+    runs: list[KeyRun],
+    output: Path,
+    presets: tuple[str, ...],
+) -> dict[str, object]:
     invalid_operator = [run.slug for run in runs if not operator_output_valid(run)]
     invalid_causal = [job.slug for job in causal_schedule(runs) if not causal_output_valid(job)]
     gates = {
@@ -331,9 +345,12 @@ def render(runs: list[KeyRun], output: Path) -> dict[str, object]:
     if not all(gates.values()):
         raise ValueError(f"priority evidence incomplete: {gates}")
     output.mkdir(parents=True, exist_ok=True)
-    artifacts = [*render_spaghetti(runs, output), *render_causal_controls(runs, output)]
+    artifacts = [
+        *render_spaghetti(runs, output, presets),
+        *render_causal_controls(runs, output, presets),
+    ]
     summary = []
-    for preset in PRESETS:
+    for preset in presets:
         for _, _, condition in KEY_CONDITIONS:
             selected = [run for run in runs if run.preset == preset and run.condition == condition]
             summary.append(
@@ -358,7 +375,7 @@ def render(runs: list[KeyRun], output: Path) -> dict[str, object]:
         "horizons": HORIZONS,
         "mixed_endpoints_explicit": True,
         "conditions": [condition for _, _, condition in KEY_CONDITIONS],
-        "presets": list(PRESETS),
+        "presets": list(presets),
         "seeds": list(SEEDS),
         "operator_steps": {
             condition: list(operator_steps_for(next(run for run in runs if run.condition == condition)))
@@ -412,7 +429,11 @@ def _synthetic_run(
     atomic_json(
         prefix.with_suffix(".json"),
         {
-            "metadata": {"run_name": run.path.name, "folds": 5},
+            "metadata": {
+                "run_name": run.path.name,
+                "folds": 5,
+                "projection_fit": "inductive_state_alias_fold",
+            },
             "records": [
                 {
                     "step": step,
@@ -463,7 +484,10 @@ def _synthetic_run(
     return run
 
 
-def self_test(output: Path | None) -> None:
+def self_test(
+    output: Path | None,
+    presets: tuple[str, ...],
+) -> None:
     context = tempfile.TemporaryDirectory(prefix="render-priority-") if output is None else None
     root = Path(context.name) if context is not None else output
     assert root is not None
@@ -473,11 +497,11 @@ def self_test(output: Path | None) -> None:
     runs = [
         _synthetic_run(inputs, task, corruption, condition, preset, seed)
         for task, corruption, condition in KEY_CONDITIONS
-        for preset in PRESETS
+        for preset in presets
         for seed in SEEDS
     ]
     figures = root / "figures"
-    manifest = render(runs, figures)
+    manifest = render(runs, figures, presets)
     expected = {
         "priority-spaghetti.png",
         "priority-spaghetti.pdf",
@@ -495,12 +519,15 @@ def self_test(output: Path | None) -> None:
 
 def main() -> None:
     args = parse_args()
+    presets = tuple(args.presets) if args.presets else PRESETS
+    if len(presets) != 2 or len(set(presets)) != len(presets):
+        raise ValueError("--preset must select exactly two distinct presets")
     if args.self_test:
-        self_test(args.self_test_output)
+        self_test(args.self_test_output, presets)
         return
     if not args.run or args.output is None:
         raise ValueError("--run and --output are required")
-    render(_load_runs(args.run), args.output)
+    render(_load_runs(args.run, presets), args.output, presets)
 
 
 if __name__ == "__main__":
