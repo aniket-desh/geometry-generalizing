@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from matplotlib.animation import FFMpegWriter, FuncAnimation
+from matplotlib.animation import FuncAnimation, PillowWriter
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from pythia_geometry import DOMAINS, safe_name
@@ -47,7 +47,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layer", type=int, default=8)
     parser.add_argument("--cache-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--video", type=Path, required=True)
+    parser.add_argument(
+        "--gif",
+        "--video",
+        dest="gif",
+        type=Path,
+        required=True,
+        help="Looping GIF destination; --video remains as a compatibility alias.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=float,
+        default=1.25,
+        help="Measured checkpoints shown per second.",
+    )
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -174,40 +187,17 @@ def mature_phase_projection(frames: list[np.ndarray]) -> list[np.ndarray]:
     return [frame / max(final_radius, 1e-12) for frame in projected]
 
 
-def interpolated_frames(
-    frames: list[np.ndarray],
-    steps: list[int],
-    *,
-    between: int = 18,
-    hold: int = 18,
-) -> tuple[list[np.ndarray], list[float]]:
-    positions = [frames[0]] * hold
-    labels = [float(steps[0])] * hold
-    for index in range(len(frames) - 1):
-        for substep in range(between):
-            fraction = (substep + 1) / between
-            smooth = fraction * fraction * (3 - 2 * fraction)
-            positions.append(
-                (1 - smooth) * frames[index] + smooth * frames[index + 1]
-            )
-            labels.append(
-                (1 - fraction) * steps[index] + fraction * steps[index + 1]
-            )
-    positions.extend([frames[-1]] * hold)
-    labels.extend([float(steps[-1])] * hold)
-    return positions, labels
-
-
-def render_movie(
+def render_gif(
     sample_paths: list[Path],
     revisions: tuple[str, ...] | list[str],
     output: Path,
+    *,
+    fps: float,
 ) -> None:
     raw = [np.load(path)["samples"] for path in sample_paths]
     high_dimensional = [remove_template_offsets(frame) for frame in raw]
-    projected = mature_phase_projection(high_dimensional)
+    frames = mature_phase_projection(high_dimensional)
     steps = [revision_step(revision) for revision in revisions]
-    frames, labels = interpolated_frames(projected, steps)
 
     coordinates = np.concatenate(frames)
     limit = max(1.25, float(np.quantile(np.abs(coordinates), 0.995)) * 1.08)
@@ -218,6 +208,8 @@ def render_movie(
 
     fig, axis = plt.subplots(figsize=(5.8, 5.4))
     fig.patch.set_facecolor("white")
+    fig.subplots_adjust(left=0.025, right=0.975, top=0.975, bottom=0.11)
+    axis.set_facecolor("white")
     axis.set_aspect("equal")
     axis.set_xlim(-limit, limit)
     axis.set_ylim(-limit, limit)
@@ -225,7 +217,6 @@ def render_movie(
     axis.set_yticks([])
     axis.spines[:].set_visible(False)
 
-    orbit, = axis.plot([], [], color=MUTED, alpha=0.22, linewidth=1.0)
     points = axis.scatter([], [], s=16, alpha=0.28)
     centroids = axis.scatter(
         [],
@@ -274,33 +265,26 @@ def render_movie(
         centers = np.stack(
             [frame[groups == group].mean(axis=0) for group in range(7)]
         )
-        closed = np.vstack((centers, centers[0]))
-        orbit.set_data(closed[:, 0], closed[:, 1])
         points.set_offsets(frame)
         points.set_color([NORD[group] for group in groups])
         centroids.set_offsets(centers)
         centroids.set_color(NORD)
-        step_label.set_text(f"step {labels[index]:,.0f}")
-        return orbit, points, centroids, step_label
+        step_label.set_text(f"step {steps[index]:,}")
+        return points, centroids, step_label
 
     animation = FuncAnimation(
         fig,
         update,
         frames=len(frames),
-        interval=1000 / 24,
+        interval=1000 / fps,
         blit=True,
-        repeat=False,
+        repeat=True,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     animation.save(
         output,
-        writer=FFMpegWriter(
-            fps=24,
-            codec="libx264",
-            bitrate=1900,
-            extra_args=["-pix_fmt", "yuv420p", "-movflags", "+faststart"],
-        ),
-        dpi=180,
+        writer=PillowWriter(fps=fps),
+        dpi=160,
     )
     update(len(frames) - 1)
     fig.savefig(
@@ -313,9 +297,11 @@ def render_movie(
 
 def main() -> None:
     args = parse_args()
+    if args.fps <= 0:
+        raise ValueError("--fps must be positive")
     sample_paths = ensure_samples(args)
-    render_movie(sample_paths, args.revisions, args.video)
-    print(f"wrote {args.video}", flush=True)
+    render_gif(sample_paths, args.revisions, args.gif, fps=args.fps)
+    print(f"wrote {args.gif}", flush=True)
 
 
 if __name__ == "__main__":
