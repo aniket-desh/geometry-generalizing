@@ -24,6 +24,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preset", choices=tuple(PRESETS), default="small")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--split-seed", type=int)
+    parser.add_argument("--task-seed", type=int)
+    parser.add_argument("--token-seed", type=int)
+    parser.add_argument("--corruption", type=float, default=0.0)
     parser.add_argument("--steps", type=int, default=30_000)
     parser.add_argument("--batch-size", type=int, default=2048)
     parser.add_argument("--train-fraction", type=float, default=0.4)
@@ -35,6 +38,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--snapshot-every", type=int, default=500)
     parser.add_argument("--checkpoint-every", type=int, default=10_000)
+    parser.add_argument("--keep-checkpoints", type=int, default=0)
+    parser.add_argument("--dense-checkpoint-every", type=int, default=0)
+    parser.add_argument(
+        "--dense-checkpoint-dtype",
+        choices=("float16", "float32"),
+        default="float16",
+    )
     parser.add_argument("--output-root", type=Path, default=Path("geometry-results"))
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--resume", action="store_true")
@@ -53,6 +63,36 @@ def json_safe(value: object) -> object:
     if isinstance(value, (np.integer,)):
         return int(value)
     return value
+
+
+def save_dense_checkpoint(
+    model: GeometryTransformer,
+    path: Path,
+    *,
+    step: int,
+    dtype: str,
+) -> None:
+    floating_dtype = torch.float16 if dtype == "float16" else torch.float32
+    state = {
+        name: (
+            value.detach().cpu().to(floating_dtype)
+            if value.is_floating_point()
+            else value.detach().cpu()
+        )
+        for name, value in model.state_dict().items()
+    }
+    torch.save(
+        {"format": "weights-only-v1", "step": step, "model": state},
+        path,
+    )
+
+
+def prune_checkpoints(run_dir: Path, keep: int) -> None:
+    if keep <= 0:
+        return
+    checkpoints = sorted(run_dir.glob("checkpoint-*.pt"))
+    for checkpoint in checkpoints[:-keep]:
+        checkpoint.unlink()
 
 
 def make_split(order: int, fraction: float, seed: int) -> np.ndarray:
@@ -74,7 +114,15 @@ def make_split(order: int, fraction: float, seed: int) -> np.ndarray:
 
 
 class TokenLayout:
-    def __init__(self, order: int, aliases: int, contexts: int) -> None:
+    def __init__(
+        self,
+        order: int,
+        aliases: int,
+        contexts: int,
+        *,
+        seed: int,
+        device: torch.device,
+    ) -> None:
         self.order = order
         self.aliases = aliases
         self.contexts = contexts
@@ -84,12 +132,29 @@ class TokenLayout:
         self.node_base = self.context_base + contexts
         self.relation_base = self.node_base + order * aliases
         self.vocab_size = self.relation_base + order * aliases
+        rng = np.random.default_rng(seed)
+        surface = self.node_base + rng.permutation(2 * order * aliases)
+        node_tokens = surface[: order * aliases].reshape(aliases, order)
+        relation_tokens = surface[order * aliases :].reshape(aliases, order)
+        self.node_tokens = torch.as_tensor(
+            node_tokens, dtype=torch.long, device=device
+        )
+        self.relation_tokens = torch.as_tensor(
+            relation_tokens, dtype=torch.long, device=device
+        )
 
     def node(self, latent: torch.Tensor, alias: torch.Tensor) -> torch.Tensor:
-        return self.node_base + alias * self.order + latent
+        return self.node_tokens[alias, latent]
 
     def relation(self, latent: torch.Tensor, alias: torch.Tensor) -> torch.Tensor:
-        return self.relation_base + alias * self.order + latent
+        return self.relation_tokens[alias, latent]
+
+    def save(self, path: Path) -> None:
+        np.savez_compressed(
+            path,
+            node=self.node_tokens.cpu().numpy(),
+            relation=self.relation_tokens.cpu().numpy(),
+        )
 
 
 def build_tokens(
@@ -197,6 +262,12 @@ def evaluate(
 
 def run() -> None:
     args = parse_args()
+    if not 0.0 <= args.corruption <= 1.0:
+        raise ValueError("--corruption must lie in [0, 1]")
+    if args.keep_checkpoints < 0:
+        raise ValueError("--keep-checkpoints cannot be negative")
+    if args.dense_checkpoint_every < 0:
+        raise ValueError("--dense-checkpoint-every cannot be negative")
     if args.device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is unavailable")
     torch.set_num_threads(1)
@@ -209,14 +280,24 @@ def run() -> None:
         torch.cuda.manual_seed_all(args.seed)
 
     split_seed = args.seed if args.split_seed is None else args.split_seed
-    task = make_task(args.task, seed=split_seed)
+    task_seed = args.seed if args.task_seed is None else args.task_seed
+    token_seed = args.seed if args.token_seed is None else args.token_seed
+    task = make_task(
+        args.task,
+        seed=task_seed,
+        corruption=args.corruption,
+    )
     train_mask_np = make_split(task.order, args.train_fraction, split_seed)
     identity_payload = {
         "task": args.task,
+        "task_seed": task_seed,
+        "corruption": args.corruption,
         "preset": args.preset,
         "seed": args.seed,
         "split_seed": split_seed,
+        "token_seed": token_seed,
         "train_fraction": args.train_fraction,
+        "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "aliases": args.aliases,
@@ -226,7 +307,7 @@ def run() -> None:
     digest = hashlib.sha1(
         json.dumps(identity_payload, sort_keys=True).encode()
     ).hexdigest()[:8]
-    run_name = f"{args.task}-{args.preset}-s{args.seed}-{digest}"
+    run_name = f"{task.name}-{args.preset}-s{args.seed}-{digest}"
     run_dir = args.output_root / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     done_path = run_dir / "done.json"
@@ -240,7 +321,13 @@ def run() -> None:
     table = torch.as_tensor(task.table, device=device, dtype=torch.long)
     train_mask = torch.as_tensor(train_mask_np, device=device)
     train_pairs = torch.nonzero(train_mask, as_tuple=False)
-    layout = TokenLayout(task.order, args.aliases, args.contexts)
+    layout = TokenLayout(
+        task.order,
+        args.aliases,
+        args.contexts,
+        seed=token_seed,
+        device=device,
+    )
     config: ModelConfig = PRESETS[args.preset]
     raw_model = GeometryTransformer(
         vocab_size=layout.vocab_size,
@@ -275,10 +362,18 @@ def run() -> None:
         "task_family": task.family,
         "task_description": task.description,
         "task_order": task.order,
+        "task_seed": task_seed,
+        "task_corruption_fraction": task.corruption_fraction,
+        "task_table_sha256": hashlib.sha256(task.table.tobytes()).hexdigest(),
+        "token_seed": token_seed,
         "model": config.__dict__,
         "batch_size": args.batch_size,
         "eval_every": args.eval_every,
         "snapshot_every": args.snapshot_every,
+        "checkpoint_every": args.checkpoint_every,
+        "keep_checkpoints": args.keep_checkpoints,
+        "dense_checkpoint_every": args.dense_checkpoint_every,
+        "dense_checkpoint_dtype": args.dense_checkpoint_dtype,
         "compile": args.compile,
         "table_compositionality_error": table_compositionality(task),
         "parameter_count": sum(parameter.numel() for parameter in raw_model.parameters()),
@@ -292,6 +387,7 @@ def run() -> None:
     )
     np.save(run_dir / "operation_table.npy", task.table)
     np.save(run_dir / "train_mask.npy", train_mask_np)
+    layout.save(run_dir / "token_layout.npz")
 
     metrics_path = run_dir / "metrics.jsonl"
     snapshot_steps = {0, args.steps}
@@ -300,6 +396,16 @@ def run() -> None:
     checkpoint_steps.update(
         range(args.checkpoint_every, args.steps, args.checkpoint_every)
     )
+    dense_checkpoint_steps: set[int] = set()
+    if args.dense_checkpoint_every:
+        dense_checkpoint_steps = {args.steps}
+        dense_checkpoint_steps.update(
+            range(
+                args.dense_checkpoint_every,
+                args.steps,
+                args.dense_checkpoint_every,
+            )
+        )
     start = time.time()
 
     for step in range(start_step, args.steps + 1):
@@ -359,6 +465,14 @@ def run() -> None:
                     "config": config_payload,
                 },
                 run_dir / f"checkpoint-{step:06d}.pt",
+            )
+            prune_checkpoints(run_dir, args.keep_checkpoints)
+        if step in dense_checkpoint_steps and step > 0:
+            save_dense_checkpoint(
+                raw_model,
+                run_dir / f"weights-{step:06d}.pt",
+                step=step,
+                dtype=args.dense_checkpoint_dtype,
             )
         if step == args.steps:
             break

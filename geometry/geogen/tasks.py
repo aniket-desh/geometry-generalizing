@@ -12,6 +12,7 @@ class TaskSpec:
     table: np.ndarray
     generator: int | None
     description: str
+    corruption_fraction: float = 0.0
 
     @property
     def order(self) -> int:
@@ -90,30 +91,50 @@ def _path(order: int) -> np.ndarray:
     return np.clip(states + shifts[None, :], 0, order - 1).astype(np.int64)
 
 
-def _random_permutations(order: int, seed: int) -> np.ndarray:
+def _random_permutations(
+    order: int, seed: int, *, preserve_identity: bool = True
+) -> np.ndarray:
     rng = np.random.default_rng(seed)
     table = np.empty((order, order), dtype=np.int64)
-    table[:, 0] = np.arange(order)
-    for relation in range(1, order):
+    first_random_relation = 0
+    if preserve_identity:
+        table[:, 0] = np.arange(order)
+        first_random_relation = 1
+    for relation in range(first_random_relation, order):
         table[:, relation] = rng.permutation(order)
     return table
 
 
-def _broken_cycle(order: int, seed: int, corruption: float = 0.15) -> np.ndarray:
+def _frequency_preserving_corruption(
+    table: np.ndarray, seed: int, corruption: float
+) -> np.ndarray:
+    if not 0.0 <= corruption <= 1.0:
+        raise ValueError("corruption must lie in [0, 1]")
+    corrupted = np.asarray(table, dtype=np.int64).copy()
+    if corruption == 0.0:
+        return corrupted
+
     rng = np.random.default_rng(seed)
-    table = _cycle(order)
-    for relation in range(1, order):
-        count = max(2, round(order * corruption))
+    order, relation_count = corrupted.shape
+    count = max(2, round(order * corruption))
+    count = min(count, order)
+    for relation in range(relation_count):
         rows = rng.choice(order, size=count, replace=False)
-        shuffled = table[rows, relation].copy()
-        rng.shuffle(shuffled)
-        if np.array_equal(shuffled, table[rows, relation]):
-            shuffled = np.roll(shuffled, 1)
-        table[rows, relation] = shuffled
-    return table
+        values = corrupted[rows, relation].copy()
+        shift = int(rng.integers(1, count))
+        corrupted[rows, relation] = np.roll(values, shift)
+    return corrupted
 
 
-def make_task(name: str, seed: int = 0) -> TaskSpec:
+def _broken_cycle(order: int, seed: int, corruption: float = 0.15) -> np.ndarray:
+    return _frequency_preserving_corruption(
+        _cycle(order), seed=seed, corruption=corruption
+    )
+
+
+def make_task(
+    name: str, seed: int = 0, *, corruption: float = 0.0
+) -> TaskSpec:
     builders = {
         "cycle7": (
             "cycle",
@@ -199,18 +220,40 @@ def make_task(name: str, seed: int = 0) -> TaskSpec:
             None,
             "A larger frequency-matched random-permutation control.",
         ),
+        "random113": (
+            "random_permutation",
+            _random_permutations(113, seed, preserve_identity=False),
+            None,
+            "Independent frequency-matched random operations at grokking scale.",
+        ),
     }
     try:
         family, table, generator, description = builders[name]
     except KeyError as exc:
         choices = ", ".join(sorted(builders))
         raise ValueError(f"unknown task {name!r}; choose one of {choices}") from exc
+    if corruption:
+        if family != "cycle":
+            raise ValueError("corruption is supported only for cycle tasks")
+        table = _frequency_preserving_corruption(
+            table, seed=seed, corruption=corruption
+        )
+        family = "broken_cycle"
+        fraction = f"{corruption:.4f}".rstrip("0").rstrip(".")
+        task_name = f"{name}-corrupt{fraction.replace('.', 'p')}"
+        description = (
+            f"{description} {corruption:.1%} of every relation column is "
+            "permuted without changing its output frequencies."
+        )
+    else:
+        task_name = name
     spec = TaskSpec(
-        name=name,
+        name=task_name,
         family=family,
         table=np.asarray(table, dtype=np.int64),
         generator=generator,
         description=description,
+        corruption_fraction=float(corruption),
     )
     spec.validate()
     return spec
@@ -232,4 +275,5 @@ def available_tasks() -> tuple[str, ...]:
         "broken12",
         "random16",
         "random31",
+        "random113",
     )
