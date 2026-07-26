@@ -122,17 +122,39 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render the reusable-geometry experiment suite."
     )
-    parser.add_argument("--results", type=Path, action="append")
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--task", default="cycle113")
-    parser.add_argument("--preset", default="grok")
-    parser.add_argument("--main-condition", default="clean")
-    parser.add_argument("--operator-view", choices=("node", "output"), default="node")
-    parser.add_argument("--operator-layer", default="last")
+    parser.add_argument(
+        "--results",
+        type=Path,
+        action="append",
+        help="Result root or run directory; repeat for multiple roots.",
+    )
+    parser.add_argument(
+        "--output", type=Path, help="Directory for figures and the manifest."
+    )
+    parser.add_argument("--task", default="cycle113", help="Task name, or all.")
+    parser.add_argument("--preset", default="grok", help="Model preset, or all.")
+    parser.add_argument(
+        "--main-condition",
+        default="clean",
+        help="Condition used for checkpoint-aligned traces.",
+    )
+    parser.add_argument(
+        "--operator-view",
+        choices=("node", "output"),
+        default="node",
+        help="Activation view for operator metrics.",
+    )
+    parser.add_argument(
+        "--operator-layer",
+        default="last",
+        help="Operator layer index, or last.",
+    )
     parser.add_argument(
         "--causal-position", choices=("node", "output"), default="output"
     )
-    parser.add_argument("--causal-layer", default="last")
+    parser.add_argument(
+        "--causal-layer", default="last", help="Causal layer index, or last."
+    )
     parser.add_argument(
         "--animate-run",
         default="auto",
@@ -144,8 +166,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--animation-layer", default="last")
     parser.add_argument("--max-animation-frames", type=int, default=180)
     parser.add_argument("--fps", type=int, default=12)
-    parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--self-test-output", type=Path)
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Render a synthetic suite and verify every expected artifact.",
+    )
+    parser.add_argument(
+        "--self-test-output",
+        type=Path,
+        help="Keep synthetic self-test inputs and figures in this directory.",
+    )
     return parser.parse_args()
 
 
@@ -159,16 +189,25 @@ def _step_from_path(path: Path) -> int:
 def _records(path: Path) -> list[dict[str, object]]:
     if not path.exists():
         return []
-    if path.suffix == ".csv":
-        with path.open(newline="") as handle:
-            return list(csv.DictReader(handle))
-    if path.suffix == ".jsonl":
-        return [
-            json.loads(line)
-            for line in path.read_text().splitlines()
-            if line.strip()
-        ]
-    payload = json.loads(path.read_text())
+    try:
+        if path.suffix == ".csv":
+            with path.open(newline="") as handle:
+                return list(csv.DictReader(handle))
+        if path.suffix == ".jsonl":
+            records = []
+            for line in path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(record, dict):
+                    records.append(record)
+            return records
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, csv.Error):
+        return []
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict) and isinstance(payload.get("records"), list):
@@ -177,7 +216,10 @@ def _records(path: Path) -> list[dict[str, object]]:
 
 
 def _analysis_payload(path: Path) -> tuple[str | None, list[dict[str, object]]]:
-    payload = json.loads(path.read_text())
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None, []
     if not isinstance(payload, dict):
         return None, []
     metadata = payload.get("metadata", {})
@@ -202,7 +244,10 @@ def discover_runs(roots: Iterable[Path]) -> list[RunData]:
                 continue
             seen_configs.add(resolved)
             run_dir = config_path.parent
-            config = json.loads(config_path.read_text())
+            try:
+                config = json.loads(config_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
             run = RunData(
                 path=run_dir,
                 config=config,
@@ -214,14 +259,26 @@ def discover_runs(roots: Iterable[Path]) -> list[RunData]:
                 for path in operator_paths:
                     _, records = _analysis_payload(path)
                     run.operator.extend(records)
-            else:
-                run.operator.extend(_records(run_dir / "operator_reuse.csv"))
+            if not run.operator:
+                for fallback in (
+                    run_dir / "operator_reuse.jsonl",
+                    run_dir / "operator_reuse.csv",
+                ):
+                    run.operator.extend(_records(fallback))
+                    if run.operator:
+                        break
             if causal_paths:
                 for path in causal_paths:
                     _, records = _analysis_payload(path)
                     run.causal.extend(records)
-            else:
-                run.causal.extend(_records(run_dir / "causal_reuse.csv"))
+            if not run.causal:
+                for fallback in (
+                    run_dir / "causal_reuse.jsonl",
+                    run_dir / "causal_reuse.csv",
+                ):
+                    run.causal.extend(_records(fallback))
+                    if run.causal:
+                        break
             runs.append(run)
 
     by_name = {run.name: run for run in runs}
@@ -267,7 +324,11 @@ def select_operator(
     run: RunData, *, view: str, layer: str
 ) -> list[dict[str, object]]:
     candidates = [
-        record for record in run.operator if str(record.get("view")) == view
+        record
+        for record in run.operator
+        if str(record.get("view")) == view
+        and _finite(record.get("step")) is not None
+        and _finite(record.get("layer")) is not None
     ]
     if not candidates:
         return []
@@ -280,17 +341,26 @@ def select_operator(
 
 
 def select_causal(
-    run: RunData, *, position: str, layer: str
+    run: RunData,
+    *,
+    position: str,
+    layer: str,
+    final_only: bool = True,
 ) -> list[dict[str, object]]:
     candidates = [
-        record for record in run.causal if str(record.get("position")) == position
+        record
+        for record in run.causal
+        if str(record.get("position")) == position
+        and _finite(record.get("step")) is not None
+        and _finite(record.get("layer")) is not None
     ]
     if not candidates:
         return []
-    final_step = max(int(record["step"]) for record in candidates)
-    candidates = [
-        record for record in candidates if int(record["step"]) == final_step
-    ]
+    if final_only:
+        final_step = max(int(record["step"]) for record in candidates)
+        candidates = [
+            record for record in candidates if int(record["step"]) == final_step
+        ]
     selected_layer = _layer_value(layer, candidates)
     return [
         record
@@ -337,11 +407,11 @@ def _step_axis(axis: plt.Axes) -> None:
 def _save_static(fig: plt.Figure, base: Path) -> list[Path]:
     base.parent.mkdir(parents=True, exist_ok=True)
     png = base.with_suffix(".png")
-    svg = base.with_suffix(".svg")
+    pdf = base.with_suffix(".pdf")
     fig.savefig(png, dpi=240, transparent=True, bbox_inches="tight", pad_inches=0.04)
-    fig.savefig(svg, transparent=True, bbox_inches="tight", pad_inches=0.04)
+    fig.savefig(pdf, transparent=True, bbox_inches="tight", pad_inches=0.04)
     plt.close(fig)
-    return [png, svg]
+    return [png, pdf]
 
 
 def _median_curve(curves: Iterable[tuple[np.ndarray, np.ndarray]]) -> tuple[np.ndarray, np.ndarray]:
@@ -364,11 +434,26 @@ def _metric_curve(
 ) -> tuple[np.ndarray, np.ndarray]:
     records = (
         select_operator(run, view=operator_view, layer=operator_layer)
-        if key in {"joint_cv_error", "reuse_gain_bits"}
+        if key
+        in {
+            "joint_cv_error",
+            "lookup_reuse_gain_bits",
+            "reuse_gain_bits",
+        }
         else run.metrics
     )
     pairs = [
-        (int(record["step"]), _finite(record.get(key)))
+        (
+            int(record["step"]),
+            _finite(
+                record.get(
+                    key,
+                    record.get("reuse_gain_bits")
+                    if key == "lookup_reuse_gain_bits"
+                    else None,
+                )
+            ),
+        )
         for record in records
         if "step" in record
     ]
@@ -378,8 +463,35 @@ def _metric_curve(
     pairs.sort()
     xs = np.asarray([pair[0] for pair in pairs], dtype=float)
     ys = np.asarray([pair[1] for pair in pairs], dtype=float)
-    if key == "reuse_gain_bits":
+    if key in {"lookup_reuse_gain_bits", "reuse_gain_bits"}:
         ys /= 1000.0
+    return xs, ys
+
+
+def _causal_curve(
+    run: RunData, *, position: str, layer: str
+) -> tuple[np.ndarray, np.ndarray]:
+    by_step: dict[int, list[float]] = defaultdict(list)
+    for record in select_causal(
+        run, position=position, layer=layer, final_only=False
+    ):
+        if str(record.get("control")) != "learned_generator":
+            continue
+        value = None
+        for key in (
+            "qualified_desired_accuracy",
+            "probability_recovery",
+            "desired_accuracy",
+        ):
+            value = _finite(record.get(key))
+            if value is not None:
+                break
+        if value is not None:
+            by_step[int(record["step"])].append(value)
+    if not by_step:
+        return np.asarray([]), np.asarray([])
+    xs = np.asarray(sorted(by_step), dtype=float)
+    ys = np.asarray([np.median(by_step[int(step)]) for step in xs])
     return xs, ys
 
 
@@ -389,6 +501,8 @@ def render_spaghetti(
     output: Path,
     operator_view: str,
     operator_layer: str,
+    causal_position: str,
+    causal_layer: str,
 ) -> list[Path]:
     specs: list[tuple[str, str, str]] = [
         ("test_accuracy", "held-out accuracy", NORD["frost_dark"]),
@@ -397,8 +511,20 @@ def render_spaghetti(
         specs.extend(
             [
                 ("joint_cv_error", "generator error", NORD["red"]),
-                ("reuse_gain_bits", "reuse gain (kbit)", NORD["green"]),
+                (
+                    "lookup_reuse_gain_bits",
+                    "lookup − generator (kbit)",
+                    NORD["green"],
+                ),
             ]
+        )
+    if any(run.causal for run in runs):
+        specs.append(
+            (
+                "causal_shift_success",
+                "causal shift success",
+                NORD["purple"],
+            )
         )
     fig, axes = plt.subplots(
         1,
@@ -406,6 +532,7 @@ def render_spaghetti(
         figsize=(3.4 * len(specs), 2.75),
         constrained_layout=True,
         squeeze=False,
+        sharex=True,
     )
     fig.patch.set_alpha(0)
     legend_handles = [
@@ -415,12 +542,17 @@ def render_spaghetti(
     for axis, (key, label, color) in zip(axes[0], specs):
         curves = []
         for run in runs:
-            xs, ys = _metric_curve(
-                run,
-                key,
-                operator_view=operator_view,
-                operator_layer=operator_layer,
-            )
+            if key == "causal_shift_success":
+                xs, ys = _causal_curve(
+                    run, position=causal_position, layer=causal_layer
+                )
+            else:
+                xs, ys = _metric_curve(
+                    run,
+                    key,
+                    operator_view=operator_view,
+                    operator_layer=operator_layer,
+                )
             if xs.size:
                 curves.append((xs, ys))
                 axis.plot(xs, ys, color=color, alpha=0.16, linewidth=0.85)
@@ -434,8 +566,11 @@ def render_spaghetti(
         if key == "test_accuracy":
             axis.set_ylim(-0.03, 1.03)
             axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
-        if key == "reuse_gain_bits":
+        if key in {"lookup_reuse_gain_bits", "reuse_gain_bits"}:
             axis.axhline(0, color=NORD["muted"], alpha=0.25, linewidth=0.7)
+        if key == "causal_shift_success":
+            axis.set_ylim(-0.03, 1.03)
+            axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
     axes[0, 0].legend(
         legend_handles,
         ("seeds", "median"),
@@ -476,7 +611,12 @@ def render_generalization_reuse(
             step = int(record["step"])
             accuracy = _accuracy_at(run, step, record)
             error = _finite(record.get("joint_cv_error"))
-            reuse = _finite(record.get("reuse_gain_bits"))
+            reuse = _finite(
+                record.get(
+                    "lookup_reuse_gain_bits",
+                    record.get("reuse_gain_bits"),
+                )
+            )
             if accuracy is not None and error is not None and reuse is not None:
                 points.append((accuracy, error, reuse / 1000.0, step))
         if points:
@@ -547,10 +687,42 @@ def _final_operator(
     records = select_operator(run, view=view, layer=layer)
     if not records:
         return None
-    value = _finite(max(records, key=lambda item: int(item["step"])).get(key))
-    if value is not None and key == "reuse_gain_bits":
+    record = max(records, key=lambda item: int(item["step"]))
+    value = _finite(
+        record.get(
+            key,
+            record.get("reuse_gain_bits")
+            if key == "lookup_reuse_gain_bits"
+            else None,
+        )
+    )
+    if value is not None and key in {
+        "lookup_reuse_gain_bits",
+        "reuse_gain_bits",
+    }:
         value /= 1000.0
     return value
+
+
+def _final_causal(
+    run: RunData, *, position: str, layer: str
+) -> float | None:
+    values = []
+    for record in select_causal(run, position=position, layer=layer):
+        if str(record.get("control")) != "learned_generator":
+            continue
+        value = None
+        for key in (
+            "qualified_desired_accuracy",
+            "probability_recovery",
+            "desired_accuracy",
+        ):
+            value = _finite(record.get(key))
+            if value is not None:
+                break
+        if value is not None:
+            values.append(value)
+    return float(np.median(values)) if values else None
 
 
 def render_corruption_phase(
@@ -597,7 +769,7 @@ def render_corruption_phase(
                     NORD["green"],
                     lambda run: _final_operator(
                         run,
-                        "reuse_gain_bits",
+                        "lookup_reuse_gain_bits",
                         view=operator_view,
                         layer=operator_layer,
                     ),
@@ -657,6 +829,163 @@ def render_corruption_phase(
     return _save_static(fig, output / "corruption-phase")
 
 
+def _condition_key(run: RunData) -> tuple[int, float]:
+    return (1, 0.0) if run.condition == "random" else (0, run.corruption)
+
+
+def _condition_label(key: tuple[int, float]) -> str:
+    if key[0]:
+        return "random"
+    if key[1] == 0:
+        return "clean"
+    return f"{100 * key[1]:g}%"
+
+
+def render_condition_summary(
+    runs: list[RunData],
+    *,
+    output: Path,
+    operator_view: str,
+    operator_layer: str,
+    causal_position: str,
+    causal_layer: str,
+) -> list[Path]:
+    conditions = sorted({_condition_key(run) for run in runs})
+    if not conditions:
+        return []
+    specs: list[tuple[str, str, str, Callable[[RunData], float | None]]] = [
+        (
+            "accuracy",
+            "held-out accuracy",
+            NORD["frost_dark"],
+            lambda run: _final_behavior(run, "test_accuracy"),
+        )
+    ]
+    if any(run.operator for run in runs):
+        specs.extend(
+            [
+                (
+                    "error",
+                    "generator error",
+                    NORD["red"],
+                    lambda run: _final_operator(
+                        run,
+                        "joint_cv_error",
+                        view=operator_view,
+                        layer=operator_layer,
+                    ),
+                ),
+                (
+                    "reuse",
+                    "lookup − generator (kbit)",
+                    NORD["green"],
+                    lambda run: _final_operator(
+                        run,
+                        "lookup_reuse_gain_bits",
+                        view=operator_view,
+                        layer=operator_layer,
+                    ),
+                ),
+            ]
+        )
+    causal_conditions = {
+        _condition_key(run)
+        for run in runs
+        if _final_causal(
+            run, position=causal_position, layer=causal_layer
+        )
+        is not None
+    }
+    if len(causal_conditions) >= 2:
+        specs.append(
+            (
+                "causal",
+                "causal shift success",
+                NORD["purple"],
+                lambda run: _final_causal(
+                    run, position=causal_position, layer=causal_layer
+                ),
+            )
+        )
+
+    fig, axes = plt.subplots(
+        1,
+        len(specs),
+        figsize=(3.4 * len(specs), 2.9),
+        constrained_layout=True,
+        squeeze=False,
+        sharex=True,
+    )
+    fig.patch.set_alpha(0)
+    x = np.arange(len(conditions))
+    labels = [_condition_label(key) for key in conditions]
+    for axis, (metric, ylabel, color, getter) in zip(axes[0], specs):
+        by_seed: dict[int, dict[tuple[int, float], list[float]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        by_condition: dict[tuple[int, float], list[float]] = defaultdict(list)
+        for run in runs:
+            value = getter(run)
+            if value is None:
+                continue
+            key = _condition_key(run)
+            by_seed[run.seed][key].append(value)
+            by_condition[key].append(value)
+        for seed_values in by_seed.values():
+            points = [
+                (
+                    index,
+                    float(np.median(seed_values[key])),
+                )
+                for index, key in enumerate(conditions)
+                if key in seed_values
+            ]
+            axis.plot(
+                [point[0] for point in points],
+                [point[1] for point in points],
+                color=color,
+                alpha=0.15,
+                linewidth=0.8,
+            )
+            axis.scatter(
+                [point[0] for point in points],
+                [point[1] for point in points],
+                color=color,
+                alpha=0.17,
+                s=9,
+                linewidths=0,
+            )
+        median_y = [
+            (
+                float(np.median(by_condition[key]))
+                if by_condition.get(key)
+                else float("nan")
+            )
+            for key in conditions
+        ]
+        axis.plot(x, median_y, color=color, linewidth=2.5)
+        axis.scatter(x, median_y, color=color, s=18, linewidths=0, zorder=3)
+        axis.set_xticks(x, labels, rotation=35, ha="right")
+        axis.set_ylabel(ylabel)
+        if metric in {"accuracy", "causal"}:
+            axis.set_ylim(-0.03, 1.03)
+            axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
+        if metric == "reuse":
+            axis.axhline(0, color=NORD["muted"], alpha=0.25, linewidth=0.7)
+        _style_axis(axis)
+    axes[0, 0].legend(
+        [
+            Line2D([0], [0], color=NORD["muted"], alpha=0.24, linewidth=1.0),
+            Line2D([0], [0], color=NORD["frost_dark"], linewidth=2.5),
+        ],
+        ("seeds", "median"),
+        loc="best",
+        frameon=False,
+        fontsize=8,
+    )
+    return _save_static(fig, output / "condition-summary")
+
+
 def render_causal_controls(
     runs: list[RunData],
     *,
@@ -667,10 +996,11 @@ def render_causal_controls(
     controls = (
         "learned_generator",
         "exact_state_swap",
+        "target_centroid",
         "scrambled_successor",
         "random_orthogonal",
     )
-    labels = ("generator", "exact state", "scrambled", "random")
+    labels = ("generator", "exact state", "centroid", "scrambled", "random")
     samples: list[dict[str, float]] = []
     for run in runs:
         grouped: dict[int, dict[str, float]] = defaultdict(dict)
@@ -819,13 +1149,17 @@ def _animation_frames(
             else {}
         ).get("depth", 0)
     )
-    loaded = [
-        (
-            path,
-            _activation_frame(path, view=view, layer=layer, depth=depth),
-        )
-        for path in paths
-    ]
+    loaded = []
+    for path in paths:
+        try:
+            frame = _activation_frame(
+                path, view=view, layer=layer, depth=depth
+            )
+        except (OSError, ValueError, KeyError):
+            continue
+        loaded.append((path, frame))
+    if len(loaded) < 2:
+        raise ValueError("fewer than two readable activation frames")
     shape = loaded[-1][1].shape[:2]
     loaded = [item for item in loaded if item[1].shape[:2] == shape]
     if len(loaded) < 2:
@@ -977,7 +1311,23 @@ def render_all(
     selected = matching_runs(
         runs, task=task, preset=preset, condition=main_condition
     )
-    phase_runs = matching_runs(runs, task=task, preset=preset)
+    exact_phase_runs = matching_runs(runs, task=task, preset=preset)
+    phase_orders = {
+        int(run.config.get("task_order", -1)) for run in exact_phase_runs
+    }
+    phase_runs = [
+        run
+        for run in runs
+        if (preset == "all" or run.preset == preset)
+        and (
+            task == "all"
+            or run.task == task
+            or (
+                run.condition == "random"
+                and int(run.config.get("task_order", -2)) in phase_orders
+            )
+        )
+    ]
     output.mkdir(parents=True, exist_ok=True)
     artifacts: list[Path] = []
     if selected:
@@ -987,6 +1337,8 @@ def render_all(
                 output=output,
                 operator_view=operator_view,
                 operator_layer=operator_layer,
+                causal_position=causal_position,
+                causal_layer=causal_layer,
             )
         )
         artifacts.extend(
@@ -1013,20 +1365,33 @@ def render_all(
             operator_layer=operator_layer,
         )
     )
+    artifacts.extend(
+        render_condition_summary(
+            phase_runs,
+            output=output,
+            operator_view=operator_view,
+            operator_layer=operator_layer,
+            causal_position=causal_position,
+            causal_layer=causal_layer,
+        )
+    )
     movie_run = _choose_animation_run(
         runs, request=animate_run, task=task, preset=preset
     )
     if movie_run is not None:
-        artifacts.extend(
-            render_geometry_movie(
-                movie_run,
-                output=output,
-                view=animation_view,
-                layer=animation_layer,
-                max_frames=max_animation_frames,
-                fps=fps,
+        try:
+            artifacts.extend(
+                render_geometry_movie(
+                    movie_run,
+                    output=output,
+                    view=animation_view,
+                    layer=animation_layer,
+                    max_frames=max_animation_frames,
+                    fps=fps,
+                )
             )
-        )
+        except (OSError, ValueError, KeyError):
+            movie_run = None
     manifest: dict[str, object] = {
         "roots": [str(root) for root in roots],
         "run_count": len(runs),
@@ -1059,13 +1424,24 @@ def _write_fixture(root: Path) -> None:
     circle = np.column_stack((np.cos(angles), np.sin(angles)))
     embedding, _ = np.linalg.qr(rng.normal(size=(width, 2)))
     for seed in range(3):
-        for corruption in (0.0, 0.15, 0.60):
-            run_dir = root / f"cycle113-grok-s{seed}-c{corruption:g}"
+        for task, corruption in (
+            ("cycle113", 0.0),
+            ("cycle113", 0.15),
+            ("cycle113", 0.60),
+            ("random113", 0.0),
+        ):
+            random_control = task.startswith("random")
+            clean = task == "cycle113" and corruption == 0
+            run_dir = root / f"{task}-grok-s{seed}-c{corruption:g}"
             run_dir.mkdir(parents=True)
             config = {
                 "run_name": run_dir.name,
-                "task": "cycle113",
-                "task_family": "cycle" if corruption == 0 else "broken_cycle",
+                "task": task,
+                "task_family": (
+                    "random_permutation"
+                    if random_control
+                    else ("cycle" if corruption == 0 else "broken_cycle")
+                ),
                 "task_order": order,
                 "task_corruption_fraction": corruption,
                 "preset": "grok",
@@ -1077,7 +1453,11 @@ def _write_fixture(root: Path) -> None:
             np.save(run_dir / "operation_table.npy", _cycle_table(order))
             metric_records = []
             operator_records = []
-            threshold = 12_000 + 22_000 * corruption + seed * 800
+            threshold = (
+                80_000
+                if random_control
+                else 12_000 + 22_000 * corruption + seed * 800
+            )
             for step in steps:
                 accuracy = 1 / (1 + np.exp(-(step - threshold) / 2_700))
                 metric_records.append(
@@ -1095,14 +1475,20 @@ def _write_fixture(root: Path) -> None:
                             "layer": layer,
                             "test_accuracy": float(accuracy),
                             "joint_cv_error": float(
-                                1.25 - 0.95 * accuracy + 0.45 * corruption
+                                1.25
+                                - 0.95 * accuracy
+                                + 0.45 * corruption
+                                + 0.35 * random_control
                             ),
-                            "reuse_gain_bits": float(
-                                55_000 * accuracy - 35_000 * corruption - 8_000
+                            "lookup_reuse_gain_bits": float(
+                                55_000 * accuracy
+                                - 35_000 * corruption
+                                - 8_000
+                                - 28_000 * random_control
                             ),
                         }
                     )
-                if corruption == 0 and seed == 0:
+                if clean and seed == 0:
                     blend = float(accuracy)
                     random_points = rng.normal(size=(order, aliases, 2))
                     target = circle[:, None, :] + 0.08 * rng.normal(
@@ -1118,9 +1504,12 @@ def _write_fixture(root: Path) -> None:
                         node=layers.astype(np.float32),
                         output=layers.astype(np.float32),
                     )
-            (run_dir / "metrics.jsonl").write_text(
-                "".join(json.dumps(record) + "\n" for record in metric_records)
+            metrics_text = "".join(
+                json.dumps(record) + "\n" for record in metric_records
             )
+            if random_control and seed == 0:
+                metrics_text += '{"step":'
+            (run_dir / "metrics.jsonl").write_text(metrics_text)
             (run_dir / "operator_reuse.json").write_text(
                 json.dumps(
                     {
@@ -1130,27 +1519,42 @@ def _write_fixture(root: Path) -> None:
                 )
                 + "\n"
             )
-            if corruption == 0:
+            if random_control and seed == 0:
+                (run_dir / "operator_reuse-partial.json").write_text(
+                    '{"metadata":'
+                )
+            if clean:
                 causal_records = []
                 recoveries = {
                     "learned_generator": 0.76,
                     "exact_state_swap": 1.0,
+                    "target_centroid": 0.88,
                     "scrambled_successor": 0.06,
                     "random_orthogonal": 0.02,
                 }
-                for fold in range(3):
-                    for control, recovery in recoveries.items():
-                        causal_records.append(
-                            {
-                                "step": steps[-1],
-                                "fold": fold,
-                                "position": "output",
-                                "layer": 1,
-                                "control": control,
-                                "probability_recovery": recovery
-                                + 0.025 * rng.normal(),
-                            }
-                        )
+                for step in steps:
+                    progress = 1 / (
+                        1 + np.exp(-(step - threshold) / 2_700)
+                    )
+                    for fold in range(3):
+                        for control, recovery in recoveries.items():
+                            causal_records.append(
+                                {
+                                    "step": step,
+                                    "fold": fold,
+                                    "position": "output",
+                                    "layer": 1,
+                                    "control": control,
+                                    "qualified_desired_accuracy": float(
+                                        recovery * progress
+                                        + 0.025 * rng.normal()
+                                    ),
+                                    "probability_recovery": float(
+                                        recovery * progress
+                                        + 0.025 * rng.normal()
+                                    ),
+                                }
+                            )
                 (run_dir / "causal_reuse.json").write_text(
                     json.dumps(
                         {
@@ -1191,15 +1595,17 @@ def run_self_test(destination: Path | None) -> None:
     )
     expected = {
         "training-spaghetti.png",
-        "training-spaghetti.svg",
+        "training-spaghetti.pdf",
         "generalization-and-reuse.png",
-        "generalization-and-reuse.svg",
+        "generalization-and-reuse.pdf",
         "corruption-phase.png",
-        "corruption-phase.svg",
+        "corruption-phase.pdf",
+        "condition-summary.png",
+        "condition-summary.pdf",
         "causal-controls.png",
-        "causal-controls.svg",
+        "causal-controls.pdf",
         "geometry-orbit-poster.png",
-        "geometry-orbit-poster.svg",
+        "geometry-orbit-poster.pdf",
         "render-manifest.json",
     }
     missing = [name for name in expected if not (plots / name).exists()]
