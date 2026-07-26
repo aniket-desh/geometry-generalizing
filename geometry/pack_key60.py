@@ -9,7 +9,10 @@ from staged_packer import GIB, MIB, Settings, run
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Pack and upload the gated key60 result bundle."
+        description=(
+            "Pack the gated key60 result bundle locally, with optional "
+            "explicit upload."
+        )
     )
     parser.add_argument(
         "--results-root",
@@ -50,6 +53,21 @@ def parse_args() -> argparse.Namespace:
         default="https://temp.sh/upload",
     )
     parser.add_argument("--upload-retries", type=int, default=8)
+    delivery = parser.add_mutually_exclusive_group()
+    delivery.add_argument(
+        "--local-only",
+        dest="local_only",
+        action="store_true",
+        default=True,
+        help="retain a checksummed local archive and chunks without uploading "
+        "(default)",
+    )
+    delivery.add_argument(
+        "--upload",
+        dest="local_only",
+        action="store_false",
+        help="explicitly upload wrapped chunks to --upload-endpoint",
+    )
     return parser.parse_args()
 
 
@@ -97,6 +115,7 @@ def main() -> None:
         min_free_bytes=int(args.min_free_gib * GIB),
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_hours * 3600,
+        local_only=args.local_only,
         upload_endpoint=args.upload_endpoint,
         upload_retries=args.upload_retries,
     )

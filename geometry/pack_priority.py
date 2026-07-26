@@ -16,12 +16,22 @@ from priority_common import (
     operator_steps_for,
     wait_for_runs,
 )
-from staged_packer import GIB, MIB, Settings, run, sha256
+from staged_packer import (
+    GIB,
+    MIB,
+    Settings,
+    run,
+    self_test as staged_packer_self_test,
+    sha256,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Freeze, pack, and upload the exact mixed-horizon evidence bundle."
+        description=(
+            "Freeze and pack the exact mixed-horizon evidence bundle locally, "
+            "with optional explicit upload."
+        )
     )
     parser.add_argument(
         "--results-root",
@@ -54,6 +64,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-mib", type=int, default=42)
     parser.add_argument("--upload-endpoint", default="https://temp.sh/upload")
     parser.add_argument("--upload-retries", type=int, default=8)
+    delivery = parser.add_mutually_exclusive_group()
+    delivery.add_argument(
+        "--local-only",
+        dest="local_only",
+        action="store_true",
+        default=True,
+        help="retain a checksummed local archive and chunks without uploading "
+        "(default)",
+    )
+    delivery.add_argument(
+        "--upload",
+        dest="local_only",
+        action="store_false",
+        help="explicitly upload wrapped chunks to --upload-endpoint",
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
@@ -246,7 +271,11 @@ def self_test() -> None:
             raise AssertionError("control 60k checkpoint leaked into mixed-horizon bundle")
         if (selected / "logs" / "slot.lock").exists():
             raise AssertionError("lock file leaked into bundle")
-    print("self-test passed: exact mixed-horizon selection excludes control 60k")
+    staged_packer_self_test()
+    print(
+        "self-test passed: mixed-horizon selection and local-only packing "
+        "validated"
+    )
 
 
 def main() -> None:
@@ -298,6 +327,7 @@ def main() -> None:
             min_free_bytes=int(args.min_free_gib * GIB),
             poll_seconds=args.poll_seconds,
             timeout_seconds=args.timeout_hours * 3600,
+            local_only=args.local_only,
             upload_endpoint=args.upload_endpoint,
             upload_retries=args.upload_retries,
         )

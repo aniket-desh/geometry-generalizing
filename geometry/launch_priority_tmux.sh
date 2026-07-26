@@ -16,6 +16,7 @@ timeout_hours="${PRIORITY_TIMEOUT_HOURS:-24}"
 min_free_gb="${PRIORITY_MIN_FREE_GB:-8}"
 chunk_mib="${PRIORITY_CHUNK_MIB:-42}"
 upload_endpoint="${PRIORITY_UPLOAD_ENDPOINT:-https://temp.sh/upload}"
+upload="${PRIORITY_UPLOAD:-0}"
 compile="${PRIORITY_COMPILE:-1}"
 launch_key_train="${PRIORITY_LAUNCH_KEY_TRAIN:-1}"
 launch_analysis="${PRIORITY_LAUNCH_ANALYSIS:-1}"
@@ -72,12 +73,17 @@ case "${scale_phase}" in
 esac
 for toggle in \
     "${launch_key_train}" "${launch_analysis}" "${launch_pack}" \
-    "${launch_scale_train}" "${launch_scale_analysis}"; do
+    "${launch_scale_train}" "${launch_scale_analysis}" "${upload}"; do
     case "${toggle}" in
         0|1) ;;
         *) echo "PRIORITY_LAUNCH_* switches must be 0 or 1" >&2; exit 2 ;;
     esac
 done
+case "${upload}" in
+    0) delivery_flag="--local-only" ;;
+    1) delivery_flag="--upload" ;;
+    *) echo "PRIORITY_UPLOAD must be 0 or 1" >&2; exit 2 ;;
+esac
 for path in \
     "${repo_root}" "${work_root}" "${venv_python}" "${results_root}" \
     "${log_root}" "${figure_root}" "${selection_root}" "${archive_root}" \
@@ -183,7 +189,7 @@ fi
 
 if (( launch_pack )); then
     start_session 0 "${session_prefix}-pack" \
-        "\"${venv_python}\" geometry/pack_priority.py --results-root \"${results_root}\" --log-root \"${log_root}\" --figure-root \"${figure_root}\" --selection-root \"${selection_root}\" --output-root \"${archive_root}\" --timeout-hours ${timeout_hours} --min-free-gib ${min_free_gb} --chunk-mib ${chunk_mib} --upload-endpoint \"${upload_endpoint}\""
+        "\"${venv_python}\" geometry/pack_priority.py --results-root \"${results_root}\" --log-root \"${log_root}\" --figure-root \"${figure_root}\" --selection-root \"${selection_root}\" --output-root \"${archive_root}\" --timeout-hours ${timeout_hours} --min-free-gib ${min_free_gb} --chunk-mib ${chunk_mib} ${delivery_flag} --upload-endpoint \"${upload_endpoint}\""
 fi
 
 if (( launch_scale_analysis )); then

@@ -92,6 +92,7 @@ class Settings:
     timeout_seconds: float
     upload_endpoint: str
     upload_retries: int
+    local_only: bool = True
 
 
 def now() -> str:
@@ -280,6 +281,20 @@ def valid_url(value: object) -> bool:
     return isinstance(value, str) and TEMP_SH_URL.fullmatch(value) is not None
 
 
+def delivery_mode(payload: dict[str, object]) -> str | None:
+    mode = payload.get("delivery")
+    if mode in ("local-only", "upload"):
+        return str(mode)
+    parts = payload.get("parts")
+    if isinstance(parts, list) and parts:
+        if all(
+            isinstance(part, dict) and valid_url(part.get("url"))
+            for part in parts
+        ):
+            return "upload"
+    return None
+
+
 def resumable_parts(
     manifest_path: Path,
     *,
@@ -287,12 +302,18 @@ def resumable_parts(
     archive_sha: str,
     chunk_bytes: int,
 ) -> list[dict[str, object]] | None:
+    if chunk_bytes <= 0:
+        return None
+    try:
+        archive_bytes = archive.stat().st_size
+    except OSError:
+        return None
     payload = load_json(manifest_path)
     if (
         not isinstance(payload, dict)
         or payload.get("archive") != str(archive)
         or payload.get("archive_sha256") != archive_sha
-        or payload.get("archive_bytes") != archive.stat().st_size
+        or payload.get("archive_bytes") != archive_bytes
         or payload.get("chunk_bytes") != chunk_bytes
     ):
         return None
@@ -300,57 +321,133 @@ def resumable_parts(
     if not isinstance(parts, list) or not parts:
         return None
     validated: list[dict[str, object]] = []
+    reconstructed = hashlib.sha256()
     for index, part in enumerate(parts):
         if not isinstance(part, dict) or part.get("index") != index:
             return None
         path = Path(str(part.get("raw_chunk", "")))
+        raw_bytes = part.get("raw_bytes")
+        if not isinstance(raw_bytes, int) or isinstance(raw_bytes, bool):
+            return None
+        expected_bytes = chunk_bytes
+        if index == len(parts) - 1:
+            expected_bytes = raw_bytes
+        try:
+            actual_bytes = path.stat().st_size if path.is_file() else -1
+        except OSError:
+            return None
         if (
-            not path.is_file()
-            or path.stat().st_size != part.get("raw_bytes")
-            or path.stat().st_size > chunk_bytes
-            or sha256(path) != part.get("raw_sha256")
-            or (part.get("url") is not None and not valid_url(part.get("url")))
+            actual_bytes != raw_bytes
+            or actual_bytes != expected_bytes
+            or actual_bytes <= 0
+            or actual_bytes > chunk_bytes
+            or (
+                part.get("url") is not None
+                and not valid_url(part.get("url"))
+            )
         ):
             return None
+        part_digest = hashlib.sha256()
+        try:
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(8 * MIB), b""):
+                    part_digest.update(block)
+                    reconstructed.update(block)
+        except OSError:
+            return None
+        if part_digest.hexdigest() != part.get("raw_sha256"):
+            return None
         validated.append(dict(part))
-    if sum(int(part["raw_bytes"]) for part in validated) != archive.stat().st_size:
+    if sum(int(part["raw_bytes"]) for part in validated) != archive_bytes:
+        return None
+    if reconstructed.hexdigest() != archive_sha:
         return None
     return validated
 
 
-def completion_valid(path: Path) -> bool:
+def completion_valid(
+    path: Path,
+    *,
+    require_upload: bool = False,
+) -> bool:
     payload = load_json(path)
     if not isinstance(payload, dict) or payload.get("status") != "complete":
         return False
+    mode = delivery_mode(payload)
+    if mode is None or (require_upload and mode != "upload"):
+        return False
     archive = Path(str(payload.get("archive", "")))
+    archive_sha = str(payload.get("archive_sha256", ""))
+    archive_bytes = payload.get("archive_bytes")
+    chunk_bytes = payload.get("chunk_bytes")
     if (
-        not archive.is_file()
-        or archive.stat().st_size != payload.get("archive_bytes")
-        or sha256(archive) != payload.get("archive_sha256")
+        not isinstance(archive_bytes, int)
+        or isinstance(archive_bytes, bool)
+        or not isinstance(chunk_bytes, int)
+        or isinstance(chunk_bytes, bool)
+        or chunk_bytes <= 0
+    ):
+        return False
+    try:
+        actual_archive_bytes = (
+            archive.stat().st_size if archive.is_file() else -1
+        )
+        actual_archive_sha = sha256(archive)
+    except OSError:
+        return False
+    if (
+        actual_archive_bytes != archive_bytes
+        or actual_archive_sha != archive_sha
+    ):
+        return False
+    archive_sha_path = Path(str(payload.get("archive_sha256_file", "")))
+    try:
+        checksum_contents = archive_sha_path.read_text()
+    except (OSError, UnicodeError):
+        return False
+    if (
+        not archive_sha_path.is_file()
+        or checksum_contents != f"{archive_sha}  {archive.name}\n"
     ):
         return False
     parts = payload.get("parts")
+    manifest_path = Path(str(payload.get("parts_manifest", "")))
+    manifest_payload = load_json(manifest_path)
     manifest_parts = resumable_parts(
-        Path(str(payload.get("parts_manifest", ""))),
+        manifest_path,
         archive=archive,
-        archive_sha=str(payload["archive_sha256"]),
-        chunk_bytes=int(payload.get("chunk_bytes", 0)),
+        archive_sha=archive_sha,
+        chunk_bytes=chunk_bytes,
     )
     if (
         not isinstance(parts, list)
         or not parts
+        or not isinstance(manifest_payload, dict)
+        or delivery_mode(manifest_payload) != mode
         or manifest_parts is None
         or len(parts) != len(manifest_parts)
     ):
         return False
-    return all(
-        isinstance(part, dict)
-        and valid_url(part.get("url"))
-        and part.get("index") == manifest.get("index")
-        and part.get("raw_sha256") == manifest.get("raw_sha256")
-        and part.get("url") == manifest.get("url")
-        for part, manifest in zip(parts, manifest_parts, strict=True)
+    compared_fields = (
+        "index",
+        "raw_chunk",
+        "raw_bytes",
+        "raw_sha256",
+        "wrapper",
+        "url",
     )
+    for part, manifest in zip(parts, manifest_parts, strict=True):
+        if not isinstance(part, dict) or any(
+            part.get(field) != manifest.get(field)
+            for field in compared_fields
+        ):
+            return False
+        if mode == "upload":
+            if not valid_url(part.get("url")):
+                return False
+        elif part.get("url") is not None:
+            return False
+    return True
 
 
 def validate_paths(settings: Settings) -> None:
@@ -386,7 +483,10 @@ def run(
     except BlockingIOError as error:
         raise RuntimeError(f"stage already has a live packer: {settings.stage}") from error
 
-    if completion_valid(completion_path):
+    if completion_valid(
+        completion_path,
+        require_upload=not settings.local_only,
+    ):
         log(f"already complete: {completion_path}")
         return completion_path
 
@@ -457,6 +557,9 @@ def run(
             {
                 "updated_at": now(),
                 "stage": settings.stage,
+                "delivery": (
+                    "local-only" if settings.local_only else "upload"
+                ),
                 "archive": str(archive),
                 "archive_bytes": archive.stat().st_size,
                 "archive_sha256": archive_sha,
@@ -466,37 +569,52 @@ def run(
         )
 
     write_manifest()
-    for part in chunks:
-        if valid_url(part["url"]):
-            continue
-        raw_chunk = Path(str(part["raw_chunk"]))
-        wrapper = Path(str(part["wrapper"]))
-        wrap_chunk(raw_chunk, wrapper)
-        if uploader is None:
-            url = upload_temp_sh(
-                wrapper,
-                endpoint=settings.upload_endpoint,
-                retries=settings.upload_retries,
-                log=log,
-            )
-        else:
-            url = uploader(wrapper)
-        if not valid_url(url):
-            raise RuntimeError(f"uploader returned an invalid URL: {url}")
-        part["wrapper_bytes"] = wrapper.stat().st_size
-        part["url"] = url
+    if settings.local_only:
+        for part in chunks:
+            Path(str(part["wrapper"])).unlink(missing_ok=True)
+            part.pop("wrapper_bytes", None)
+            part["url"] = None
         write_manifest()
-        wrapper.unlink()
-        log(f"uploaded part {part['index'] + 1}/{len(chunks)}: {url}")
+        log(
+            f"local-only bundle ready with {len(chunks)} raw chunks; "
+            "no upload attempted"
+        )
+    else:
+        for part in chunks:
+            if valid_url(part["url"]):
+                continue
+            raw_chunk = Path(str(part["raw_chunk"]))
+            wrapper = Path(str(part["wrapper"]))
+            wrap_chunk(raw_chunk, wrapper)
+            if uploader is None:
+                url = upload_temp_sh(
+                    wrapper,
+                    endpoint=settings.upload_endpoint,
+                    retries=settings.upload_retries,
+                    log=log,
+                )
+            else:
+                url = uploader(wrapper)
+            if not valid_url(url):
+                raise RuntimeError(f"uploader returned an invalid URL: {url}")
+            part["wrapper_bytes"] = wrapper.stat().st_size
+            part["url"] = url
+            write_manifest()
+            wrapper.unlink()
+            log(
+                f"uploaded part {part['index'] + 1}/{len(chunks)}: {url}"
+            )
 
-    if not all(valid_url(part.get("url")) for part in chunks):
-        raise RuntimeError("refusing to complete with missing part URLs")
+        if not all(valid_url(part.get("url")) for part in chunks):
+            raise RuntimeError("refusing to complete with missing part URLs")
+    delivery = "local-only" if settings.local_only else "upload"
     atomic_json(
         completion_path,
         {
             "completed_at": now(),
             "status": "complete",
             "stage": settings.stage,
+            "delivery": delivery,
             "marker": str(settings.marker),
             "archive": str(archive),
             "archive_bytes": archive.stat().st_size,
@@ -510,6 +628,14 @@ def run(
             "parts": chunks,
         },
     )
+    if not completion_valid(
+        completion_path,
+        require_upload=not settings.local_only,
+    ):
+        completion_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"{delivery} completion marker failed validation"
+        )
     log(f"complete: {completion_path}")
     return completion_path
 
@@ -536,6 +662,21 @@ def parse_args() -> argparse.Namespace:
         default="https://temp.sh/upload",
     )
     parser.add_argument("--upload-retries", type=int, default=8)
+    delivery = parser.add_mutually_exclusive_group()
+    delivery.add_argument(
+        "--local-only",
+        dest="local_only",
+        action="store_true",
+        default=True,
+        help="retain a checksummed local archive and chunks without uploading "
+        "(default)",
+    )
+    delivery.add_argument(
+        "--upload",
+        dest="local_only",
+        action="store_false",
+        help="explicitly upload wrapped chunks to --upload-endpoint",
+    )
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args()
 
@@ -577,6 +718,7 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         min_free_bytes=int(args.min_free_gib * GIB),
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_hours * 3600,
+        local_only=args.local_only,
         upload_endpoint=args.upload_endpoint,
         upload_retries=args.upload_retries,
     )
@@ -602,8 +744,51 @@ def self_test() -> None:
             min_free_bytes=1,
             poll_seconds=0.01,
             timeout_seconds=1,
+            local_only=True,
             upload_endpoint="unused",
             upload_retries=1,
+        )
+
+        def forbidden_upload(_: Path) -> str:
+            raise AssertionError("local-only mode attempted an upload")
+
+        completion = run(settings, uploader=forbidden_upload)
+        payload = load_json(completion)
+        assert completion_valid(completion)
+        assert not completion_valid(completion, require_upload=True)
+        assert isinstance(payload, dict)
+        assert payload["delivery"] == "local-only"
+        assert Path(str(payload["archive_sha256_file"])).is_file()
+        parts = payload["parts"]
+        assert isinstance(parts, list) and len(parts) >= 2
+        assert all(part["url"] is None for part in parts)
+        assert all(
+            int(part["raw_bytes"]) <= settings.chunk_bytes for part in parts
+        )
+        assert all(Path(str(part["raw_chunk"])).exists() for part in parts)
+        reconstructed = b"".join(
+            Path(str(part["raw_chunk"])).read_bytes() for part in parts
+        )
+        assert hashlib.sha256(reconstructed).hexdigest() == payload[
+            "archive_sha256"
+        ]
+        checksum_path = Path(str(payload["archive_sha256_file"]))
+        expected_checksum = checksum_path.read_text()
+        checksum_path.write_text("0" * 64 + "  tiny.tar.gz\n")
+        assert not completion_valid(completion)
+        checksum_path.write_text(expected_checksum)
+        first_chunk = Path(str(parts[0]["raw_chunk"]))
+        expected_chunk = first_chunk.read_bytes()
+        first_chunk.write_bytes(b"x" + expected_chunk[1:])
+        assert not completion_valid(completion)
+        first_chunk.write_bytes(expected_chunk)
+        assert completion_valid(completion)
+
+        upload_settings = Settings(
+            **{
+                **settings.__dict__,
+                "local_only": False,
+            }
         )
 
         def fake_upload(path: Path) -> str:
@@ -613,16 +798,18 @@ def self_test() -> None:
             return f"https://temp.sh/test/{path.name}"
 
         completion = run(
-            settings,
+            upload_settings,
             uploader=fake_upload,
         )
         payload = load_json(completion)
-        assert completion_valid(completion)
+        assert completion_valid(completion, require_upload=True)
         assert isinstance(payload, dict)
+        assert payload["delivery"] == "upload"
         parts = payload["parts"]
         assert isinstance(parts, list) and len(parts) >= 2
         assert all(
-            int(part["raw_bytes"]) <= settings.chunk_bytes for part in parts
+            int(part["raw_bytes"]) <= upload_settings.chunk_bytes
+            for part in parts
         )
         assert all(Path(str(part["raw_chunk"])).exists() for part in parts)
         assert not any(
@@ -643,7 +830,7 @@ def self_test() -> None:
         def fail_upload(_: Path) -> str:
             raise AssertionError("completed stage attempted another upload")
 
-        assert run(settings, uploader=fail_upload) == completion
+        assert run(upload_settings, uploader=fail_upload) == completion
         assert (source / "small.json").exists()
     print("self-test passed")
 

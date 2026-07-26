@@ -71,9 +71,34 @@ residual stream after the final block.
 The final marker is withheld until behavior, canonical-cycle geometry, usable
 shared-rule MDL, and causal outputs validate for all 18 runs.
 `render_priority.py` writes Nord spaghetti plots with faded seeds and bold
-pointwise medians. Packing is independently disabled by default because
-`pack_priority.py` uploads the archive to its configured endpoint; enable it
-only with `PRIORITY_LAUNCH_PACK=1`.
+pointwise medians. Packing is independently disabled by default. Enable it
+with `PRIORITY_LAUNCH_PACK=1`; the packer then stays local by default and
+finishes only after validating the archive, its SHA-256 sidecar, and every raw
+chunk against a byte-for-byte reconstruction of the archive. The completion
+marker and chunk manifest use `delivery: "local-only"` and contain no URLs, so
+the archive directory can be copied directly from the host.
+
+External upload requires a second, explicit switch:
+
+```bash
+# Checksummed local archive only; no network upload.
+PRIORITY_LAUNCH_KEY_TRAIN=0 \
+  PRIORITY_LAUNCH_ANALYSIS=0 \
+  PRIORITY_LAUNCH_PACK=1 \
+  geometry/launch_priority_tmux.sh
+
+# Upload wrapped chunks only when this is intentionally requested.
+PRIORITY_LAUNCH_KEY_TRAIN=0 \
+  PRIORITY_LAUNCH_ANALYSIS=0 \
+  PRIORITY_LAUNCH_PACK=1 \
+  PRIORITY_UPLOAD=1 \
+  PRIORITY_UPLOAD_ENDPOINT=https://temp.sh/upload \
+  geometry/launch_priority_tmux.sh
+```
+
+The corresponding direct CLI flags are `--local-only` (the default) and
+`--upload`. Merely setting `--upload-endpoint` or `PRIORITY_UPLOAD_ENDPOINT`
+does not enable an upload.
 
 On the four-GPU host, the defaults expect the checkout at
 `/home/ubuntu/a/vi-activation-geometry` and put all generated state under
