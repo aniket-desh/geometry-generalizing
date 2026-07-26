@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--profile",
-        choices=("pilot", "priority", "confirmation"),
+        choices=("pilot", "priority", "confirmation", "scale"),
         default="pilot",
     )
     parser.add_argument("--workers", type=int, default=4)
@@ -110,6 +110,27 @@ def matrix(profile: str) -> list[Run]:
             for seed in range(4)
             for preset in ("grok", "micro")
             for task, corruption, condition in CONDITIONS
+        ]
+    if profile == "scale":
+        scale_conditions = tuple(
+            condition
+            for condition in CONDITIONS
+            if condition[2] in {"clean", "corrupt05", "corrupt15", "random"}
+        )
+        return [
+            Run(
+                task,
+                corruption,
+                condition,
+                "small",
+                seed,
+                60_000,
+                1_000,
+                eval_every=500,
+                snapshot_every=1_000,
+            )
+            for seed in range(4)
+            for task, corruption, condition in scale_conditions
         ]
     raise ValueError(profile)
 
