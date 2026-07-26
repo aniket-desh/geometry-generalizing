@@ -17,9 +17,12 @@ MODEL_SPECS = {
         ModelSpec("gpt2", "openai-community/gpt2", "gpt2", "gpt2"),
         ModelSpec("gpt2-medium", "openai-community/gpt2-medium", "gpt2", "gpt2-medium"),
         ModelSpec("gpt2-large", "openai-community/gpt2-large", "gpt2", "gpt2-large"),
+        ModelSpec("gpt2-xl", "openai-community/gpt2-xl", "gpt2", "gpt2-xl"),
         ModelSpec("pythia-160m", "EleutherAI/pythia-160m", "pythia", "pythia-160m"),
         ModelSpec("pythia-410m", "EleutherAI/pythia-410m", "pythia", "pythia-410m"),
         ModelSpec("pythia-1b", "EleutherAI/pythia-1b", "pythia", "pythia-1b"),
+        ModelSpec("pythia-2.8b", "EleutherAI/pythia-2.8b", "pythia", "pythia-2.8b"),
+        ModelSpec("pythia-6.9b", "EleutherAI/pythia-6.9b", "pythia", "pythia-6.9b"),
     )
 }
 

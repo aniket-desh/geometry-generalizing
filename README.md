@@ -29,8 +29,8 @@ All long commands run in named tmux sessions and stream to files under
 
 The default matrix runs:
 
-- GPT-2 small, medium, and large;
-- Pythia 160M, 410M, and 1B;
+- GPT-2 small, medium, large, and XL;
+- Pythia 160M, 410M, 1B, 2.8B, and 6.9B;
 - three disjoint 50K-token calibration windows;
 - one disjoint 100K-token evaluation stream;
 - five importance rankings plus random baselines;
@@ -46,6 +46,7 @@ Every stage writes a completion artifact and can be resumed safely.
 ```bash
 python run_model.py --model gpt2 --output-root /workspace/ohope/results
 bash run_matrix.sh
+bash run_matrix.sh gpt2-xl pythia-2.8b pythia-6.9b
 python render_aggregate.py --results /workspace/ohope/results
 python summarize_results.py --results /workspace/ohope/results
 ```

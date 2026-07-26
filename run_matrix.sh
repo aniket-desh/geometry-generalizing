@@ -17,14 +17,21 @@ export PYTHONUNBUFFERED=1
 mkdir -p "$RESULTS_DIR" "$CACHE_DIR" "$MPLCONFIGDIR"
 cd "$CODE_DIR" || exit 1
 
-models=(
-  gpt2
-  pythia-160m
-  gpt2-medium
-  pythia-410m
-  gpt2-large
-  pythia-1b
-)
+if (($#)); then
+  models=("$@")
+else
+  models=(
+    gpt2
+    pythia-160m
+    gpt2-medium
+    pythia-410m
+    gpt2-large
+    pythia-1b
+    gpt2-xl
+    pythia-2.8b
+    pythia-6.9b
+  )
+fi
 
 failures=()
 for model in "${models[@]}"; do
