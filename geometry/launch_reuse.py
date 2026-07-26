@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--profile",
-        choices=("pilot", "priority", "confirmation", "scale"),
+        choices=("pilot", "priority", "confirmation", "scale", "medium"),
         default="pilot",
     )
     parser.add_argument("--workers", type=int, default=4)
@@ -66,12 +66,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("/workspace/geometry-reuse-results"),
     )
     parser.add_argument(
         "--log-root",
         type=Path,
-        default=Path("/workspace/geometry-reuse-logs"),
     )
     parser.add_argument("--min-free-gb", type=float, default=8.0)
     parser.add_argument("--compile", action="store_true")
@@ -126,6 +124,28 @@ def matrix(profile: str) -> list[Run]:
                 seed,
                 60_000,
                 1_000,
+                eval_every=500,
+                snapshot_every=1_000,
+            )
+            for seed in range(4)
+            for task, corruption, condition in scale_conditions
+        ]
+    if profile == "medium":
+        scale_conditions = tuple(
+            condition
+            for condition in CONDITIONS
+            if condition[2] in {"clean", "corrupt05", "corrupt15", "random"}
+        )
+        return [
+            Run(
+                task,
+                corruption,
+                condition,
+                "medium",
+                seed,
+                30_000,
+                1_000,
+                batch_size=2_048,
                 eval_every=500,
                 snapshot_every=1_000,
             )
@@ -260,6 +280,18 @@ def main() -> None:
     args = parse_args()
     if args.workers < 1:
         raise ValueError("--workers must be positive")
+    if args.output_root is None:
+        args.output_root = Path(
+            "/workspace/geometry-medium-results"
+            if args.profile == "medium"
+            else "/workspace/geometry-reuse-results"
+        )
+    if args.log_root is None:
+        args.log_root = Path(
+            "/workspace/geometry-medium-logs"
+            if args.profile == "medium"
+            else "/workspace/geometry-reuse-logs"
+        )
     args.output_root.mkdir(parents=True, exist_ok=True)
     profile_log_root = args.log_root / args.profile
     profile_log_root.mkdir(parents=True, exist_ok=True)
