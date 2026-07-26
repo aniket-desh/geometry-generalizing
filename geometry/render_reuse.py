@@ -307,6 +307,18 @@ def _finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _preferred_reuse_gain(record: dict[str, object]) -> float | None:
+    for key in (
+        "usable_reuse_gain_bits",
+        "lookup_reuse_gain_bits",
+        "reuse_gain_bits",
+    ):
+        value = _finite(record.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _layer_value(layer: str, records: list[dict[str, object]]) -> int:
     available = sorted(
         {
@@ -437,6 +449,7 @@ def _metric_curve(
         if key
         in {
             "joint_cv_error",
+            "usable_reuse_gain_bits",
             "lookup_reuse_gain_bits",
             "reuse_gain_bits",
         }
@@ -445,13 +458,15 @@ def _metric_curve(
     pairs = [
         (
             int(record["step"]),
-            _finite(
-                record.get(
-                    key,
-                    record.get("reuse_gain_bits")
-                    if key == "lookup_reuse_gain_bits"
-                    else None,
-                )
+            (
+                _preferred_reuse_gain(record)
+                if key
+                in {
+                    "usable_reuse_gain_bits",
+                    "lookup_reuse_gain_bits",
+                    "reuse_gain_bits",
+                }
+                else _finite(record.get(key))
             ),
         )
         for record in records
@@ -463,7 +478,11 @@ def _metric_curve(
     pairs.sort()
     xs = np.asarray([pair[0] for pair in pairs], dtype=float)
     ys = np.asarray([pair[1] for pair in pairs], dtype=float)
-    if key in {"lookup_reuse_gain_bits", "reuse_gain_bits"}:
+    if key in {
+        "usable_reuse_gain_bits",
+        "lookup_reuse_gain_bits",
+        "reuse_gain_bits",
+    }:
         ys /= 1000.0
     return xs, ys
 
@@ -512,8 +531,8 @@ def render_spaghetti(
             [
                 ("joint_cv_error", "generator error", NORD["red"]),
                 (
-                    "lookup_reuse_gain_bits",
-                    "lookup − generator (kbit)",
+                    "usable_reuse_gain_bits",
+                    "usable shared-rule gain (kbit)",
                     NORD["green"],
                 ),
             ]
@@ -566,7 +585,11 @@ def render_spaghetti(
         if key == "test_accuracy":
             axis.set_ylim(-0.03, 1.03)
             axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
-        if key in {"lookup_reuse_gain_bits", "reuse_gain_bits"}:
+        if key in {
+            "usable_reuse_gain_bits",
+            "lookup_reuse_gain_bits",
+            "reuse_gain_bits",
+        }:
             axis.axhline(0, color=NORD["muted"], alpha=0.25, linewidth=0.7)
         if key == "causal_shift_success":
             axis.set_ylim(-0.03, 1.03)
@@ -611,12 +634,7 @@ def render_generalization_reuse(
             step = int(record["step"])
             accuracy = _accuracy_at(run, step, record)
             error = _finite(record.get("joint_cv_error"))
-            reuse = _finite(
-                record.get(
-                    "lookup_reuse_gain_bits",
-                    record.get("reuse_gain_bits"),
-                )
-            )
+            reuse = _preferred_reuse_gain(record)
             if accuracy is not None and error is not None and reuse is not None:
                 points.append((accuracy, error, reuse / 1000.0, step))
         if points:
@@ -628,7 +646,7 @@ def render_generalization_reuse(
     fig.patch.set_alpha(0)
     for axis, value_index, ylabel, color in (
         (axes[0], 1, "generator error", NORD["red"]),
-        (axes[1], 2, "reuse gain (kbit)", NORD["green"]),
+        (axes[1], 2, "usable shared-rule gain (kbit)", NORD["green"]),
     ):
         by_step: dict[int, list[tuple[float, float]]] = defaultdict(list)
         for curve in curves:
@@ -688,15 +706,18 @@ def _final_operator(
     if not records:
         return None
     record = max(records, key=lambda item: int(item["step"]))
-    value = _finite(
-        record.get(
-            key,
-            record.get("reuse_gain_bits")
-            if key == "lookup_reuse_gain_bits"
-            else None,
-        )
+    value = (
+        _preferred_reuse_gain(record)
+        if key
+        in {
+            "usable_reuse_gain_bits",
+            "lookup_reuse_gain_bits",
+            "reuse_gain_bits",
+        }
+        else _finite(record.get(key))
     )
     if value is not None and key in {
+        "usable_reuse_gain_bits",
         "lookup_reuse_gain_bits",
         "reuse_gain_bits",
     }:
@@ -765,11 +786,11 @@ def render_corruption_phase(
                 ),
                 (
                     "reuse",
-                    "reuse gain (kbit)",
+                    "usable shared-rule gain (kbit)",
                     NORD["green"],
                     lambda run: _final_operator(
                         run,
-                        "lookup_reuse_gain_bits",
+                        "usable_reuse_gain_bits",
                         view=operator_view,
                         layer=operator_layer,
                     ),
@@ -877,11 +898,11 @@ def render_condition_summary(
                 ),
                 (
                     "reuse",
-                    "lookup − generator (kbit)",
+                    "shared rule vs best alternative (kbit)",
                     NORD["green"],
                     lambda run: _final_operator(
                         run,
-                        "lookup_reuse_gain_bits",
+                        "usable_reuse_gain_bits",
                         view=operator_view,
                         layer=operator_layer,
                     ),
@@ -1468,6 +1489,12 @@ def _write_fixture(root: Path) -> None:
                     }
                 )
                 for layer in (0, 1):
+                    usable_gain = float(
+                        55_000 * accuracy
+                        - 35_000 * corruption
+                        - 8_000
+                        - 28_000 * random_control
+                    )
                     operator_records.append(
                         {
                             "step": step,
@@ -1480,12 +1507,9 @@ def _write_fixture(root: Path) -> None:
                                 + 0.45 * corruption
                                 + 0.35 * random_control
                             ),
-                            "lookup_reuse_gain_bits": float(
-                                55_000 * accuracy
-                                - 35_000 * corruption
-                                - 8_000
-                                - 28_000 * random_control
-                            ),
+                            "usable_reuse_gain_bits": usable_gain,
+                            "lookup_reuse_gain_bits": usable_gain + 5_000,
+                            "reuse_gain_bits": usable_gain + 10_000,
                         }
                     )
                 if clean and seed == 0:
@@ -1567,6 +1591,20 @@ def _write_fixture(root: Path) -> None:
 
 
 def run_self_test(destination: Path | None) -> None:
+    if _preferred_reuse_gain(
+        {
+            "usable_reuse_gain_bits": 1.0,
+            "lookup_reuse_gain_bits": 2.0,
+            "reuse_gain_bits": 3.0,
+        }
+    ) != 1.0:
+        raise AssertionError("usable reuse gain was not preferred")
+    if _preferred_reuse_gain(
+        {"lookup_reuse_gain_bits": 2.0, "reuse_gain_bits": 3.0}
+    ) != 2.0:
+        raise AssertionError("lookup reuse gain fallback failed")
+    if _preferred_reuse_gain({"reuse_gain_bits": 3.0}) != 3.0:
+        raise AssertionError("legacy reuse gain fallback failed")
     temporary: tempfile.TemporaryDirectory[str] | None = None
     if destination is None:
         temporary = tempfile.TemporaryDirectory(prefix="reuse-render-")
