@@ -497,15 +497,18 @@ def self_test() -> None:
         jobs = causal_schedule(runs)
         if len(jobs) != KEY_COUNT or not all(causal_output_valid(job) for job in jobs):
             raise AssertionError("causal validation failed")
-        shards = [_shard_specs(_job_specs(), index, 3) for index in range(3)]
-        if [len(shard) for shard in shards] != [6, 6, 6]:
-            raise AssertionError("18 causal jobs did not shard into 3x6")
+        shards = [_shard_specs(_job_specs(), index, 4) for index in range(4)]
+        if [len(shard) for shard in shards] != [5, 5, 4, 4]:
+            raise AssertionError("18 causal jobs did not partition across four shards")
+        flattened = [spec for shard in shards for spec in shard]
+        if len(flattened) != len(set(flattened)):
+            raise AssertionError("causal shards overlap")
         control = next(run for run in runs if run.condition == "random")
         if (control.path / "weights-060000.pt").exists():
             raise AssertionError("synthetic control unexpectedly has a 60k checkpoint")
     print(
         "self-test passed: 18 mixed-horizon runs, per-condition operator steps, "
-        "18 endpoint causal jobs, and deterministic 3x6 shards"
+        "18 endpoint causal jobs, and four disjoint causal shards"
     )
 
 

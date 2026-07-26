@@ -41,18 +41,72 @@ geometry companion to `/workspace/geometry-breadth-figures`. Since this pilot
 has one seed per task, both figures show measured checkpoints directly and do
 not draw a median.
 
-`launch_key60_tmux.sh` runs the isolated decisive matrix without changing the
-broader 64-run queue. It requires exactly 18 runs: three seeds, the `grok` and
-`micro` presets, and clean cyclic addition, 15% corrupted cyclic addition, and
-a random operation table. The operator analysis measures checkpoints 10k, 30k,
-and 60k. Causal transport is tested at the final output residual stream with
-three folds and five controls for all 18 runs at 60k; the minimal developmental
-comparison adds 10k and 30k for seed 0 of the `grok` preset in all three
-conditions. The final marker is withheld until behavior, generator geometry,
-usable shared-rule MDL, and causal outputs validate for the full matrix.
-`render_key60.py` then writes Nord spaghetti plots with faded seeds and bold
-pointwise medians, and `pack_key60.py` archives the exact selected run
-directories, logs, and figures.
+`launch_priority_tmux.sh` is the four-GPU launcher for the decisive mixed-horizon
+matrix. It assigns one disjoint training shard to each physical GPU in
+`0,1,2,3`, and every tmux session receives its own `CUDA_VISIBLE_DEVICES`
+restriction before Python starts. The exact matrix is three seeds of the
+`grok` and `micro` presets: clean cyclic addition runs to 60k, while 15%
+corruption and the random-table control run to 30k. The four shards carry the
+same total number of scheduled training steps and cannot duplicate an identity.
+
+The launcher also starts marker-gated operator analysis, four causal shards,
+the causal join, final rendering, and packing in separate named tmux sessions.
+Operator and causal work share a four-slot filesystem semaphore, so analysis
+can use the four devices without launching an unbounded subprocess fleet.
+The final marker is withheld until behavior, generator geometry, usable
+shared-rule MDL, and causal outputs validate for all 18 runs.
+`render_priority.py` writes Nord spaghetti plots with faded seeds and bold
+pointwise medians, and `pack_priority.py` freezes and archives the exact
+mixed-horizon evidence bundle.
+
+On the four-GPU host, the defaults expect the checkout at
+`/home/ubuntu/a/vi-activation-geometry` and put all generated state under
+`/home/ubuntu/a/vi-activation-geometry-work`. Every filesystem path has a
+`PRIORITY_*` environment override. Validate the plan before launch:
+
+```bash
+bash -n geometry/launch_priority_tmux.sh
+geometry/launch_priority_tmux.sh --self-test
+geometry/launch_priority_tmux.sh --dry-run
+geometry/launch_priority_tmux.sh
+```
+
+`launch_key60_tmux.sh` remains the older uniform-60k protocol; it should not be
+run alongside the mixed-horizon launcher against the same result root.
+
+An optional matched-capacity phase adds the same three seeds and three
+conditions for `small` (256×4) and `medium` (512×6) models. Clean runs reach
+60k; 15%-corrupted and random controls end at 30k, for exactly 18 additional
+runs. Evaluation is every 1k steps, activation snapshots every 5k, and dense
+weights every 10k, preserving the 10k/30k/60k evidence while reducing CPU and
+disk traffic. Each of the four scale tmux sessions runs one balanced, disjoint
+shard and remains restricted to its assigned device. Keep it off when fastest
+completion of the central matrix matters, run it concurrently when memory
+permits, or gate it on all four key-training markers:
+
+```bash
+# Run the scale phase concurrently with the central matrix.
+PRIORITY_LAUNCH_SCALE=1 \
+  PRIORITY_SCALE_PHASE=parallel \
+  geometry/launch_priority_tmux.sh
+
+# Start its tmux sessions now, but train only after the key shards finish.
+PRIORITY_LAUNCH_SCALE=1 \
+  PRIORITY_SCALE_PHASE=after-key \
+  geometry/launch_priority_tmux.sh
+
+# Add only scale training when key jobs already exist.
+PRIORITY_LAUNCH_KEY_TRAIN=0 \
+  PRIORITY_LAUNCH_ANALYSIS=0 \
+  PRIORITY_LAUNCH_SCALE=1 \
+  PRIORITY_SCALE_PHASE=parallel \
+  geometry/launch_priority_tmux.sh
+```
+
+Scale artifacts use their own roots, set independently with
+`PRIORITY_SCALE_RESULTS_ROOT` and `PRIORITY_SCALE_LOG_ROOT`. A 5%-corruption
+extension is intentionally excluded from this launch plan until the matched
+three-seed evidence is complete.
 
 `reproduce_engels_geometry.py` reruns the GPT-2 small layer-7 SAE feature
 clusters reported by Engels et al. on the Pile, retaining only the weekday and
