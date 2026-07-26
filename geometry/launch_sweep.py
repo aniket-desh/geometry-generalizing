@@ -11,6 +11,19 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+BREADTH_PILOT_TASKS = (
+    "torus5",
+    "xor16",
+    "dihedral12",
+    "path16",
+    "tree15",
+    "broken12",
+    "random31",
+    "cycle24",
+    "cycle31",
+)
+
+
 @dataclass(frozen=True)
 class Run:
     task: str
@@ -34,7 +47,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--profile",
-        choices=("pilot", "anchor", "breadth-pilot", "breadth", "scale"),
+        choices=(
+            "pilot",
+            "anchor",
+            "breadth-pilot",
+            "breadth-extend",
+            "breadth",
+            "scale",
+        ),
         default="pilot",
     )
     parser.add_argument("--workers", type=int, default=4)
@@ -77,24 +97,14 @@ def matrix(profile: str) -> list[Run]:
             )
             for seed in range(4)
         ]
-    if profile == "breadth-pilot":
-        tasks = (
-            "torus5",
-            "xor16",
-            "dihedral12",
-            "path16",
-            "tree15",
-            "broken12",
-            "random31",
-            "cycle24",
-            "cycle31",
-        )
+    if profile in {"breadth-pilot", "breadth-extend"}:
+        steps = 12_000 if profile == "breadth-pilot" else 60_000
         return [
             Run(
                 task,
                 "micro",
                 0,
-                12_000,
+                steps,
                 4096,
                 eval_every=250,
                 snapshot_every=500,
@@ -102,7 +112,7 @@ def matrix(profile: str) -> list[Run]:
                 keep_checkpoints=2,
                 dense_checkpoint_every=500,
             )
-            for task in tasks
+            for task in BREADTH_PILOT_TASKS
         ]
     if profile == "breadth":
         tasks = (
@@ -228,15 +238,17 @@ def run_one(
 
 def main() -> None:
     args = parse_args()
+    uses_breadth_pilot_runs = args.profile in {"breadth-pilot", "breadth-extend"}
     output_root = args.output_root or Path(
         "/workspace/geometry-breadth-results"
-        if args.profile == "breadth-pilot"
+        if uses_breadth_pilot_runs
         else "/workspace/geometry-results"
     )
     log_root = args.log_root or Path(
-        "/workspace/geometry-breadth-logs"
-        if args.profile == "breadth-pilot"
-        else "/workspace/geometry-logs"
+        {
+            "breadth-pilot": "/workspace/geometry-breadth-logs",
+            "breadth-extend": "/workspace/geometry-breadth-extend-logs",
+        }.get(args.profile, "/workspace/geometry-logs")
     )
     output_root.mkdir(parents=True, exist_ok=True)
     log_root.mkdir(parents=True, exist_ok=True)
