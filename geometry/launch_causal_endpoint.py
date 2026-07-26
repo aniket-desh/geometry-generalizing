@@ -16,7 +16,6 @@ from finalize_reuse import (
     Run,
     atomic_json,
     discover_runs,
-    expected_specs,
     load_json,
     now,
     training_results_complete,
@@ -63,7 +62,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("/workspace/geometry-reuse-logs/causal-final"),
     )
-    parser.add_argument("--final-step", type=int, default=150_000)
+    parser.add_argument("--final-step", type=int, default=60_000)
+    parser.add_argument(
+        "--conditions",
+        default="all",
+        help=(
+            "Comma-separated condition names expected in the manifest, or all. "
+            "The selected matrix must contain both presets and all four seeds."
+        ),
+    )
     parser.add_argument("--shard-index", type=int)
     parser.add_argument("--shard-count", type=int, default=4)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
@@ -80,14 +87,74 @@ def free_gb(path: Path) -> float:
     return shutil.disk_usage(path).free / (1024**3)
 
 
+def expected_condition_names(value: str) -> set[str]:
+    available = set(CONDITIONS.values())
+    if value == "all":
+        return available
+    selected = {item.strip() for item in value.split(",") if item.strip()}
+    invalid = selected - available
+    if invalid or not selected:
+        raise ValueError(f"invalid conditions: {sorted(invalid)}")
+    return selected
+
+
+def validated_specs(
+    manifest_path: Path,
+    *,
+    final_step: int,
+    conditions: set[str],
+) -> list[dict[str, object]] | None:
+    payload = load_json(manifest_path)
+    if not isinstance(payload, dict) or payload.get("profile") != "confirmation":
+        return None
+    specs = payload.get("runs")
+    if not isinstance(specs, list) or not specs:
+        return None
+    if any(
+        not isinstance(spec, dict)
+        or int(spec.get("steps", 0)) < final_step
+        for spec in specs
+    ):
+        return None
+    expected = {
+        (task, corruption, preset, seed)
+        for (task, corruption), condition in CONDITIONS.items()
+        if condition in conditions
+        for preset in ("grok", "micro")
+        for seed in range(4)
+    }
+    observed = {
+        (
+            str(spec["task"]),
+            float(spec.get("corruption", 0.0)),
+            str(spec["preset"]),
+            int(spec["seed"]),
+        )
+        for spec in specs
+    }
+    if observed != expected or len(specs) != len(expected):
+        missing = sorted(expected - observed)
+        extra = sorted(observed - expected)
+        raise ValueError(
+            "confirmation manifest does not match the requested matrix; "
+            f"missing={missing}, extra={extra}"
+        )
+    return specs
+
+
 def ready_runs(
     *,
     results_root: Path,
     manifest_path: Path,
     results_path: Path,
     final_step: int,
+    conditions: set[str],
 ) -> list[Run] | None:
-    specs = expected_specs(manifest_path, final_step=final_step)
+    specs = validated_specs(
+        manifest_path,
+        final_step=final_step,
+        conditions=conditions,
+    )
     if specs is None:
         return None
     if not training_results_complete(
@@ -102,20 +169,26 @@ def ready_runs(
 def wait_for_runs(args: argparse.Namespace) -> list[Run]:
     deadline = time.monotonic() + args.timeout_hours * 3600.0
     last_message = 0.0
+    conditions = expected_condition_names(args.conditions)
+    expected_count = len(conditions) * 2 * 4
     while time.monotonic() < deadline:
         runs = ready_runs(
             results_root=args.results_root,
             manifest_path=args.confirmation_manifest,
             results_path=args.confirmation_results,
             final_step=args.final_step,
+            conditions=conditions,
         )
         if runs is not None:
-            if len(runs) != 64:
-                raise ValueError(f"validated matrix has {len(runs)} runs, not 64")
+            if len(runs) != expected_count:
+                raise ValueError(
+                    f"validated matrix has {len(runs)} runs, "
+                    f"not {expected_count}"
+                )
             return runs
         if time.monotonic() - last_message >= 300.0:
             print(
-                f"{now()} waiting for the validated 64-run "
+                f"{now()} waiting for the validated {expected_count}-run "
                 f"{args.final_step}-step confirmation matrix",
                 flush=True,
             )
@@ -295,13 +368,15 @@ def run_one(
     max_log_mb: float,
     dry_run: bool,
 ) -> dict[str, object]:
-    prefix = run.path / "causal_reuse_zz_final"
-    if causal_output_valid(prefix, run, final_step):
-        return {
-            "run": run.slug,
-            "status": "skipped_valid",
-            "output": str(prefix),
-        }
+    prefix = run.path / f"causal_reuse_zz_endpoint_{final_step:06d}"
+    legacy_prefix = run.path / "causal_reuse_zz_final"
+    for candidate in (prefix, legacy_prefix):
+        if causal_output_valid(candidate, run, final_step):
+            return {
+                "run": run.slug,
+                "status": "skipped_valid",
+                "output": str(candidate),
+            }
     available = min(free_gb(run.path), free_gb(log_root))
     if available < min_free_gb:
         return {
@@ -368,7 +443,7 @@ def run_self_test() -> None:
                         "condition": condition,
                         "preset": preset,
                         "seed": seed,
-                        "steps": 150_000,
+                        "steps": 60_000,
                     }
                     specs.append(spec)
                     result_records.append({**spec, "returncode": 0})
@@ -389,9 +464,9 @@ def run_self_test() -> None:
                         + "\n"
                     )
                     (run_dir / "done.json").write_text(
-                        json.dumps({"final_step": 150_000}) + "\n"
+                        json.dumps({"final_step": 60_000}) + "\n"
                     )
-                    (run_dir / "weights-150000.pt").touch()
+                    (run_dir / "weights-060000.pt").touch()
         manifest_path = root / "manifest.json"
         results_path = root / "training-results.json"
         manifest_path.write_text(
@@ -402,7 +477,8 @@ def run_self_test() -> None:
             results_root=results_root,
             manifest_path=manifest_path,
             results_path=results_path,
-            final_step=150_000,
+            final_step=60_000,
+            conditions=set(CONDITIONS.values()),
         )
         if runs is None or len(runs) != 64:
             raise AssertionError("synthetic confirmation matrix did not validate")
@@ -420,11 +496,11 @@ def run_self_test() -> None:
 
         sample = shards[0][0]
         prefix = sample.path / "causal_reuse_zz_final"
-        checkpoint = "weights-150000.pt"
+        checkpoint = "weights-060000.pt"
         sites = [{"position": "output", "layer": 1}]
         records = [
             {
-                "step": 150_000,
+                "step": 60_000,
                 "checkpoint": checkpoint,
                 "fold": fold,
                 "position": "output",
@@ -449,8 +525,8 @@ def run_self_test() -> None:
             + "\n"
         )
         prefix.with_suffix(".jsonl").write_text("{}\n")
-        prefix.with_suffix(".csv").write_text("step\n150000\n")
-        if not causal_output_valid(prefix, sample, 150_000):
+        prefix.with_suffix(".csv").write_text("step\n60000\n")
+        if not causal_output_valid(prefix, sample, 60_000):
             raise AssertionError("complete synthetic causal output was rejected")
         records.pop()
         prefix.with_suffix(".json").write_text(
@@ -467,25 +543,65 @@ def run_self_test() -> None:
             )
             + "\n"
         )
-        if causal_output_valid(prefix, sample, 150_000):
+        if causal_output_valid(prefix, sample, 60_000):
             raise AssertionError("partial synthetic causal output was accepted")
         command = command_for(
             script=Path(__file__).with_name("causal_reuse.py"),
             run=sample,
             prefix=prefix,
-            final_step=150_000,
+            final_step=60_000,
             device="cuda",
         )
         if (
             command[0] != sys.executable
-            or command[command.index("--steps") + 1] != "150000"
+            or command[command.index("--steps") + 1] != "60000"
             or command[command.index("--checkpoint-glob") + 1]
-            != "weights-150000.pt"
+            != "weights-060000.pt"
         ):
             raise AssertionError("endpoint command is not pinned and reproducible")
+
+        extension_conditions = {"clean", "corrupt15", "random"}
+        extension_specs = [
+            {**spec, "steps": 150_000}
+            for spec in specs
+            if str(spec["condition"]) in extension_conditions
+        ]
+        extension_results = [
+            {**spec, "returncode": 0} for spec in extension_specs
+        ]
+        for spec in extension_specs:
+            run_dir = (
+                results_root
+                / f"{spec['condition']}-{spec['preset']}-s{spec['seed']}"
+            )
+            (run_dir / "done.json").write_text(
+                json.dumps({"final_step": 150_000}) + "\n"
+            )
+            (run_dir / "weights-150000.pt").touch()
+        extension_manifest = root / "extension-manifest.json"
+        extension_results_path = root / "extension-results.json"
+        extension_manifest.write_text(
+            json.dumps(
+                {"profile": "confirmation", "runs": extension_specs}
+            )
+            + "\n"
+        )
+        extension_results_path.write_text(
+            json.dumps(extension_results) + "\n"
+        )
+        extended_runs = ready_runs(
+            results_root=results_root,
+            manifest_path=extension_manifest,
+            results_path=extension_results_path,
+            final_step=150_000,
+            conditions=extension_conditions,
+        )
+        if extended_runs is None or len(extended_runs) != 24:
+            raise AssertionError("selected 24-run extension did not validate")
     print(
-        "self-test passed: validated 64 runs, deterministic 4x16 shards, "
-        "strict output skipping, and a pinned sys.executable command"
+        "self-test passed: validated 64x60k and 24x150k matrices, "
+        "deterministic 4x16 shards, strict output skipping, and a pinned "
+        "sys.executable command"
     )
 
 
@@ -496,8 +612,8 @@ def main() -> None:
         return
     if args.shard_index is None:
         raise ValueError("--shard-index is required")
-    if args.final_step != 150_000:
-        raise ValueError("the causal endpoint launcher is pinned to step 150000")
+    if args.final_step < 1:
+        raise ValueError("--final-step must be positive")
     if args.poll_seconds <= 0 or args.timeout_hours <= 0:
         raise ValueError("poll interval and timeout must be positive")
     if args.min_free_gb < 0 or args.max_log_mb <= 0:
@@ -516,6 +632,7 @@ def main() -> None:
         "created_at": now(),
         "python": sys.executable,
         "final_step": args.final_step,
+        "conditions": sorted(expected_condition_names(args.conditions)),
         "shard_index": args.shard_index,
         "shard_count": args.shard_count,
         "run_count": len(selected),
