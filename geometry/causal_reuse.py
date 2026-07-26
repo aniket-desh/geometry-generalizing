@@ -979,8 +979,6 @@ def main() -> None:
     config = json.loads((run_dir / "config.json").read_text())
     table = np.load(run_dir / "operation_table.npy")
     train_mask = np.load(run_dir / "train_mask.npy").astype(bool)
-    if config.get("task_family") not in {"cycle", "broken_cycle"}:
-        raise ValueError("causal successor interventions require a cyclic task")
     order = int(config["task_order"])
     if table.shape != (order, order) or train_mask.shape != table.shape:
         raise ValueError("the saved operation table or split has the wrong shape")
@@ -997,8 +995,17 @@ def main() -> None:
         ),
     )
     if task.generator is None:
-        raise ValueError(f"{config['task']} has no designated successor")
-    successor = np.asarray(table[:, task.generator], dtype=np.int64)
+        successor = (np.arange(order) + 1) % order
+        successor_definition = (
+            "canonical latent-label cycle used as an exogenous control because "
+            "the task has no designated generator"
+        )
+    else:
+        successor = np.asarray(table[:, task.generator], dtype=np.int64)
+        successor_definition = (
+            f"operation-table relation {task.generator}, the task's designated "
+            "generator"
+        )
 
     layout = TokenLayout(
         order,
@@ -1078,6 +1085,7 @@ def main() -> None:
         "task": config["task"],
         "order": order,
         "generator_relation": task.generator,
+        "successor_definition": successor_definition,
         "checkpoints": [path.name for path in checkpoints],
         "patch_sites": [
             {"position": position, "layer": layer}
